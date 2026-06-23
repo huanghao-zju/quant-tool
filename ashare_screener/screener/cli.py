@@ -34,6 +34,12 @@ def cmd_update(args: argparse.Namespace) -> int:
             fin = fetch.fetch_latest_financials()
         cache.save_financials(fin)
         print(f"财务数据: {len(fin)} 只，报告期 {fin['report_date'].iloc[0]}")
+        if not args.no_metrics:
+            metrics = fetch.fetch_metrics()
+            cache.save_metrics(metrics)
+            n_div = int(metrics["div_yield"].notna().sum())
+            n_cagr = int(metrics["cagr_3y"].notna().sum())
+            print(f"衍生指标: 股息率 {n_div} 只，CAGR {n_cagr} 只")
     return 0
 
 
@@ -42,11 +48,12 @@ def cmd_screen(args: argparse.Namespace) -> int:
     cache = Cache(args.db)
     spot, fetched_at = cache.load_spot()
     fin = cache.load_financials(config.get("report_date"))
+    metrics = cache.load_metrics()
     if spot is None or fin is None or fin.empty:
         print("缓存为空，请先执行: python -m screener update", file=sys.stderr)
         return 1
 
-    result = screen_frames(spot, fin, config)
+    result = screen_frames(spot, fin, config, metrics)
     print(f"行情快照时间: {fetched_at} | 报告期: {fin['report_date'].iloc[0]}")
     print(f"命中 {len(result)} 只:\n")
     with __import__("pandas").option_context(
@@ -72,6 +79,9 @@ def main(argv: list[str] | None = None) -> int:
 
     p_update = sub.add_parser("update", help="拉取并缓存全市场数据")
     p_update.add_argument("--spot-only", action="store_true", help="只刷新行情快照")
+    p_update.add_argument(
+        "--no-metrics", action="store_true", help="跳过股息率/CAGR 拉取（较慢）"
+    )
     p_update.add_argument("--report-date", help="指定报告期 YYYYMMDD，默认自动取最近一期")
     p_update.set_defaults(func=cmd_update)
 

@@ -17,9 +17,42 @@ OPS = {
 }
 
 
-def merge_frames(spot: pd.DataFrame, financials: pd.DataFrame) -> pd.DataFrame:
+def merge_frames(
+    spot: pd.DataFrame,
+    financials: pd.DataFrame,
+    metrics: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     fin = financials.drop(columns=["name"], errors="ignore")
-    return spot.merge(fin, on="code", how="inner")
+    df = spot.merge(fin, on="code", how="inner")
+    if metrics is not None and not metrics.empty:
+        df = df.merge(metrics, on="code", how="left")
+    return df
+
+
+def add_derived(df: pd.DataFrame) -> pd.DataFrame:
+    """派生估值字段，供 config 直接筛选：
+
+    peg  = pe_ttm / 净利同比增速（单期，波动大，仅作对比）
+    pegy = pe_ttm / (增速 + 股息率)  —— 彼得林奇改进式
+           增速优先用多年净利 CAGR（cagr_3y），缺失则回退单期同比；
+           股息率（div_yield）缺失按 0 计。
+    """
+    if "pe_ttm" not in df.columns or "net_profit_yoy" not in df.columns:
+        return df
+    pe = pd.to_numeric(df["pe_ttm"], errors="coerce")
+    yoy = pd.to_numeric(df["net_profit_yoy"], errors="coerce")
+    df["peg"] = pe / yoy
+
+    growth = yoy
+    if "cagr_3y" in df.columns:
+        growth = pd.to_numeric(df["cagr_3y"], errors="coerce").fillna(yoy)
+    dy = (
+        pd.to_numeric(df["div_yield"], errors="coerce").fillna(0)
+        if "div_yield" in df.columns
+        else 0
+    )
+    df["pegy"] = pe / (growth + dy)
+    return df
 
 
 def apply_filters(df: pd.DataFrame, filters: list[dict]) -> pd.DataFrame:
@@ -37,10 +70,14 @@ def apply_filters(df: pd.DataFrame, filters: list[dict]) -> pd.DataFrame:
 
 
 def screen_frames(
-    spot: pd.DataFrame, financials: pd.DataFrame, config: dict
+    spot: pd.DataFrame,
+    financials: pd.DataFrame,
+    config: dict,
+    metrics: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """纯函数版筛选入口，便于单测；CLI 从缓存读出两张表后调它。"""
-    df = merge_frames(spot, financials)
+    """纯函数版筛选入口，便于单测；CLI 从缓存读出各表后调它。"""
+    df = merge_frames(spot, financials, metrics)
+    df = add_derived(df)
 
     if config.get("exclude_st", True):
         df = df[~df["name"].str.contains("ST|退", na=False)]
