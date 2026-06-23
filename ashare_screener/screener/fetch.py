@@ -2,6 +2,7 @@
 
 只使用"一次请求返回全市场"的批量接口，避免逐股发 5000+ 次请求触发风控：
 - 行情快照: ak.stock_zh_a_spot_em()          沪深京全部 A 股，含 PE/PB/市值
+  备用: datacenter-web.eastmoney.com          push2 被 TLS 指纹拦截时自动切换
 - 业绩报表: ak.stock_yjbb_em(date=报告期)     全市场财务摘要，含营收/净利/ROE/毛利率
 
 注意：AkShare 返回的是中文列名，这里统一重命名为英文字段，筛选配置里
@@ -45,9 +46,31 @@ FINANCIAL_COLUMNS = {
     "净资产收益率": "roe",
     "每股经营现金流量": "ocf_per_share",
     "销售毛利率": "gross_margin",
-    "所属行业": "industry",
+    "所处行业": "industry",
     "最新公告日期": "announce_date",
 }
+
+DATACENTER_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+
+DATACENTER_SPOT_COLUMNS = {
+    "SECURITY_CODE": "code",
+    "SECURITY_NAME_ABBR": "name",
+    "CLOSE_PRICE": "price",
+    "CHANGE_RATE": "pct_change",
+    "TURNOVERRATE": "turnover_rate",
+    "PE_DYNAMIC": "pe_ttm",
+}
+
+# RPT_VALUEANALYSIS_DET 列名 -> 标准字段（备用源补市值/PB 用，按交易日）
+DATACENTER_VALUATION_COLUMNS = {
+    "SECURITY_CODE": "code",
+    "TOTAL_MARKET_CAP": "total_mcap",
+    "NOTLIMITED_MARKETCAP_A": "float_mcap",
+    "PB_MRQ": "pb",
+}
+
+# 估值报表补齐市值/PB 后，备用源仍缺这几个 push2 独有字段
+DATACENTER_SPOT_MISSING = ["amount", "volume_ratio", "pct_60d", "pct_ytd"]
 
 QUARTER_ENDS = ((3, 31), (6, 30), (9, 30), (12, 31))
 
@@ -81,8 +104,7 @@ def _rename(df: pd.DataFrame, mapping: dict[str, str]) -> pd.DataFrame:
     return df[list(mapping)].rename(columns=mapping)
 
 
-def fetch_spot() -> pd.DataFrame:
-    """全市场实时行情快照，一次请求返回全部 5000+ 只。"""
+def _fetch_spot_akshare() -> pd.DataFrame:
     import akshare as ak
 
     df = _rename(ak.stock_zh_a_spot_em(), SPOT_COLUMNS)
@@ -90,6 +112,108 @@ def fetch_spot() -> pd.DataFrame:
     num_cols = [c for c in df.columns if c not in ("code", "name")]
     df[num_cols] = df[num_cols].apply(pd.to_numeric, errors="coerce")
     return df.dropna(subset=["price"]).reset_index(drop=True)
+
+
+def _datacenter_pull(report: str, columns: str, extra: dict | None = None) -> pd.DataFrame:
+    """datacenter-web 通用分页拉取，返回原始英文列 DataFrame。"""
+    import requests as req
+
+    rows: list[dict] = []
+    page = 1
+    while True:
+        params = {
+            "reportName": report,
+            "columns": columns,
+            "pageSize": "5000",
+            "pageNumber": str(page),
+            "source": "WEB",
+            "client": "WEB",
+        }
+        if extra:
+            params.update(extra)
+        r = req.get(DATACENTER_URL, params=params, timeout=40)
+        r.raise_for_status()
+        result = r.json().get("result") or {}
+        data = result.get("data")
+        if not data:
+            break
+        rows.extend(data)
+        if len(rows) >= result.get("count", 0):
+            break
+        page += 1
+    return pd.DataFrame(rows)
+
+
+def _latest_valuation_date(today: dt.date | None = None) -> str:
+    """估值报表最近有数据的交易日 YYYY-MM-DD（从今天往回探最多 10 天）。"""
+    import requests as req
+
+    today = today or dt.date.today()
+    for back in range(10):
+        day = (today - dt.timedelta(days=back)).strftime("%Y-%m-%d")
+        r = req.get(
+            DATACENTER_URL,
+            params={
+                "reportName": "RPT_VALUEANALYSIS_DET",
+                "columns": "SECURITY_CODE",
+                "filter": f"(TRADE_DATE='{day}')",
+                "pageSize": "1",
+                "pageNumber": "1",
+                "source": "WEB",
+                "client": "WEB",
+            },
+            timeout=20,
+        )
+        if (r.json().get("result") or {}).get("data"):
+            return day
+    raise RuntimeError("datacenter 估值报表近 10 日均无数据")
+
+
+def _fetch_valuation_datacenter(today: dt.date | None = None) -> pd.DataFrame:
+    """估值报表里的市值/PB（备用源补 push2 缺失字段用）。"""
+    day = _latest_valuation_date(today)
+    df = _datacenter_pull(
+        "RPT_VALUEANALYSIS_DET",
+        ",".join(DATACENTER_VALUATION_COLUMNS),
+        {"filter": f"(TRADE_DATE='{day}')"},
+    ).rename(columns=DATACENTER_VALUATION_COLUMNS)
+    df["code"] = df["code"].astype(str).str.zfill(6)
+    for c in ("total_mcap", "float_mcap", "pb"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df.drop_duplicates("code").reset_index(drop=True)
+
+
+def _fetch_spot_datacenter() -> pd.DataFrame:
+    df = _datacenter_pull(
+        "RPT_DMSK_TS_STOCKNEW",
+        ",".join(DATACENTER_SPOT_COLUMNS),
+        {"sortColumns": "SECURITY_CODE", "sortTypes": "1"},
+    ).rename(columns=DATACENTER_SPOT_COLUMNS)
+    df["code"] = df["code"].astype(str).str.zfill(6)
+    num_cols = [c for c in df.columns if c not in ("code", "name")]
+    df[num_cols] = df[num_cols].apply(pd.to_numeric, errors="coerce")
+    # 市值/PB 从估值报表补齐，其余 push2 独有字段置空
+    df = df.merge(_fetch_valuation_datacenter(), on="code", how="left")
+    for col in DATACENTER_SPOT_MISSING:
+        df[col] = pd.NA
+    return df.dropna(subset=["price"]).reset_index(drop=True)
+
+
+def fetch_spot() -> pd.DataFrame:
+    """全市场实时行情快照，一次请求返回全部 5000+ 只。
+
+    优先走 AkShare（push2），若被 TLS 指纹拦截则自动切换到
+    datacenter-web 备用接口（字段较少，缺少市值/PB 等）。
+    """
+    try:
+        return _fetch_spot_akshare()
+    except Exception:
+        print(
+            "AkShare 行情接口(push2)不可用，切换到备用接口(datacenter-web)…\n"
+            f"注意：备用接口缺少字段 {DATACENTER_SPOT_MISSING}（市值/PB 已从估值报表补齐），"
+            "用到缺失字段的筛选条件请从 config.yaml 中移除"
+        )
+        return _fetch_spot_datacenter()
 
 
 def fetch_financials(report_date: str) -> pd.DataFrame:
@@ -120,3 +244,65 @@ def fetch_latest_financials(
         if len(df) >= min_rows:
             return df
     raise RuntimeError(f"近 4 个报告期均无可用财务数据，最后错误: {last_err}")
+
+
+def latest_annual_year(today: dt.date | None = None) -> int:
+    """最近已基本披露完毕的年报年份。
+
+    年报最晚次年 4 月底披露完，故 5 月起取上一年，否则再往前一年。
+    """
+    today = today or dt.date.today()
+    return today.year - 1 if today.month >= 5 else today.year - 2
+
+
+def fetch_dividends(today: dt.date | None = None) -> pd.DataFrame:
+    """最近年报的全市场股息率（%），无分红的不在结果里。
+
+    取每只股最新公告的那笔分红方案（同股多笔时按公告日取最新）。
+    """
+    year = latest_annual_year(today)
+    df = _datacenter_pull(
+        "RPT_SHAREBONUS_DET",
+        "SECURITY_CODE,DIVIDENT_RATIO,PLAN_NOTICE_DATE",
+        {
+            "filter": f"(REPORT_DATE='{year}-12-31')",
+            "sortColumns": "PLAN_NOTICE_DATE",
+            "sortTypes": "-1",
+        },
+    )
+    if df.empty:
+        return pd.DataFrame(columns=["code", "div_yield"])
+    df = df.rename(columns={"SECURITY_CODE": "code", "DIVIDENT_RATIO": "div_yield"})
+    df["code"] = df["code"].astype(str).str.zfill(6)
+    df["div_yield"] = pd.to_numeric(df["div_yield"], errors="coerce") * 100  # -> %
+    df = df.dropna(subset=["div_yield"]).drop_duplicates("code", keep="first")
+    return df[["code", "div_yield"]].reset_index(drop=True)
+
+
+def fetch_cagr(today: dt.date | None = None, years: int = 3) -> pd.DataFrame:
+    """近 `years` 年净利润复合增速（%），基于年报净利润。
+
+    用最近年报与其前 `years` 年的年报，两端净利均为正才计算（亏损年
+    CAGR 无意义）。返回列名固定为 cagr_3y（默认 years=3）。
+    """
+    end_year = latest_annual_year(today)
+    start_year = end_year - years
+
+    def annual_net_profit(year: int) -> pd.DataFrame:
+        df = fetch_financials(f"{year}1231")[["code", "net_profit"]].copy()
+        df["net_profit"] = pd.to_numeric(df["net_profit"], errors="coerce")
+        return df.drop_duplicates("code")
+
+    end = annual_net_profit(end_year).rename(columns={"net_profit": "np_end"})
+    start = annual_net_profit(start_year).rename(columns={"net_profit": "np_start"})
+    m = end.merge(start, on="code")
+    m = m[(m["np_end"] > 0) & (m["np_start"] > 0)]
+    m["cagr_3y"] = ((m["np_end"] / m["np_start"]) ** (1 / years) - 1) * 100
+    return m[["code", "cagr_3y"]].reset_index(drop=True)
+
+
+def fetch_metrics(today: dt.date | None = None) -> pd.DataFrame:
+    """股息率 + 多年净利 CAGR 合并成一张按 code 的衍生指标表。"""
+    div = fetch_dividends(today)
+    cagr = fetch_cagr(today)
+    return cagr.merge(div, on="code", how="outer")

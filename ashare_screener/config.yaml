@@ -10,23 +10,37 @@
 #   net_profit 净利润 | net_profit_yoy 净利同比% | bps 每股净资产
 #   roe 净资产收益率% | ocf_per_share 每股经营现金流 | gross_margin 毛利率%
 #   industry 所属行业
+# 可用字段（衍生，update 时拉取/计算）:
+#   div_yield 股息率% | cagr_3y 近3年净利复合增速%
+#   peg  = pe_ttm / 净利同比增速（单期，波动大，仅作对比）
+#   pegy = pe_ttm / (增速 + 股息率)  彼得林奇改进式；增速优先取 cagr_3y，
+#          缺失回退单期同比，股息率缺失按 0 计。<0.5 为极佳
 # 操作符: > >= < <= == != between in contains
 
 report_date: null      # null = 用缓存里最新一期
 exclude_st: true       # 剔除 ST / 退市风险股
 exclude_bse: false     # true 则剔除北交所
 
+# 示例：彼得林奇改进 PEGY < 0.5 极佳标的（用 3 年净利 CAGR + 股息率）
 filters:
-  - {field: roe, op: ">=", value: 10}
-  - {field: pe_ttm, op: between, value: [0, 25]}   # 下限 0 顺带剔除亏损股
-  - {field: revenue_yoy, op: ">=", value: 5}
+  - {field: pegy, op: "<", value: 0.5}
+  - {field: pegy, op: ">", value: 0}              # 排除负值（亏损/负增长）
+  - {field: cagr_3y, op: between, value: [15, 60]} # 可持续快增，排低基数暴涨
+  - {field: revenue_yoy, op: ">=", value: 0}       # 营收正增长，佐证非一次性
+  - {field: roe, op: ">=", value: 12}
   - {field: total_mcap, op: ">=", value: 5.0e+9}   # 50 亿以上
   # - {field: industry, op: contains, value: "医药"}
 
-sort_by: roe
-ascending: false
+# 另一种经典示例：低估值 + 高 ROE + 营收正增长
+# filters:
+#   - {field: roe, op: ">=", value: 10}
+#   - {field: pe_ttm, op: between, value: [0, 25]}
+#   - {field: revenue_yoy, op: ">=", value: 5}
+
+sort_by: pegy
+ascending: true       # PEGY 越小越好
 top: 50
 
 output_fields:
   [code, name, industry, price, pe_ttm, pb, total_mcap,
-   roe, revenue_yoy, net_profit_yoy, gross_margin]
+   cagr_3y, div_yield, pegy, roe, revenue_yoy, gross_margin]
