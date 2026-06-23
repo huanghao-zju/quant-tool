@@ -279,6 +279,24 @@ def fetch_dividends(today: dt.date | None = None) -> pd.DataFrame:
     return df[["code", "div_yield"]].reset_index(drop=True)
 
 
+def _annual_financials(year: int, cols: list[str] | None = None) -> pd.DataFrame:
+    """某年年报，按 code 去重；cols 指定则只取这些列。"""
+    df = fetch_financials(f"{year}1231")
+    if cols:
+        df = df[cols]
+    return df.drop_duplicates("code").reset_index(drop=True)
+
+
+def _cagr_from(end_np: pd.DataFrame, start_np: pd.DataFrame, years: int) -> pd.DataFrame:
+    """由两期年报净利润算复合增速（%），两端均为正才计算。"""
+    m = end_np.rename(columns={"net_profit": "np_end"}).merge(
+        start_np.rename(columns={"net_profit": "np_start"}), on="code"
+    )
+    m = m[(m["np_end"] > 0) & (m["np_start"] > 0)]
+    m["cagr_3y"] = ((m["np_end"] / m["np_start"]) ** (1 / years) - 1) * 100
+    return m[["code", "cagr_3y"]].reset_index(drop=True)
+
+
 def fetch_cagr(today: dt.date | None = None, years: int = 3) -> pd.DataFrame:
     """近 `years` 年净利润复合增速（%），基于年报净利润。
 
@@ -286,23 +304,35 @@ def fetch_cagr(today: dt.date | None = None, years: int = 3) -> pd.DataFrame:
     CAGR 无意义）。返回列名固定为 cagr_3y（默认 years=3）。
     """
     end_year = latest_annual_year(today)
-    start_year = end_year - years
-
-    def annual_net_profit(year: int) -> pd.DataFrame:
-        df = fetch_financials(f"{year}1231")[["code", "net_profit"]].copy()
-        df["net_profit"] = pd.to_numeric(df["net_profit"], errors="coerce")
-        return df.drop_duplicates("code")
-
-    end = annual_net_profit(end_year).rename(columns={"net_profit": "np_end"})
-    start = annual_net_profit(start_year).rename(columns={"net_profit": "np_start"})
-    m = end.merge(start, on="code")
-    m = m[(m["np_end"] > 0) & (m["np_start"] > 0)]
-    m["cagr_3y"] = ((m["np_end"] / m["np_start"]) ** (1 / years) - 1) * 100
-    return m[["code", "cagr_3y"]].reset_index(drop=True)
+    end = _annual_financials(end_year, ["code", "net_profit"])
+    start = _annual_financials(end_year - years, ["code", "net_profit"])
+    for d in (end, start):
+        d["net_profit"] = pd.to_numeric(d["net_profit"], errors="coerce")
+    return _cagr_from(end, start, years)
 
 
-def fetch_metrics(today: dt.date | None = None) -> pd.DataFrame:
-    """股息率 + 多年净利 CAGR 合并成一张按 code 的衍生指标表。"""
+def fetch_metrics(today: dt.date | None = None, cagr_years: int = 3) -> pd.DataFrame:
+    """按 code 的衍生指标表：CAGR + 年报口径护城河质量 + 股息率。
+
+    护城河指标用**年报**口径（roe_annual/gross_margin_annual/cash_conv），
+    而非缓存里 financials 的季度累计口径——季度 ROE 约为年化的 1/4，直接
+    拿来做质量门槛会严重误判。年报数据复用 CAGR 的拉取，不额外发请求。
+    """
+    end_year = latest_annual_year(today)
+    ann = _annual_financials(
+        end_year, ["code", "net_profit", "roe", "gross_margin", "eps", "ocf_per_share"]
+    )
+    for c in ("net_profit", "roe", "gross_margin", "eps", "ocf_per_share"):
+        ann[c] = pd.to_numeric(ann[c], errors="coerce")
+    start = _annual_financials(end_year - cagr_years, ["code", "net_profit"])
+    start["net_profit"] = pd.to_numeric(start["net_profit"], errors="coerce")
+
+    cagr = _cagr_from(ann[["code", "net_profit"]], start, cagr_years)
+    quality = ann[["code", "roe", "gross_margin", "eps", "ocf_per_share"]].copy()
+    quality["cash_conv"] = quality["ocf_per_share"] / quality["eps"]  # 现金转化率
+    quality = quality.rename(
+        columns={"roe": "roe_annual", "gross_margin": "gross_margin_annual"}
+    )[["code", "roe_annual", "gross_margin_annual", "cash_conv"]]
     div = fetch_dividends(today)
-    cagr = fetch_cagr(today)
-    return cagr.merge(div, on="code", how="outer")
+
+    return cagr.merge(quality, on="code", how="outer").merge(div, on="code", how="outer")

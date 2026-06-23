@@ -10,8 +10,12 @@
 #   net_profit 净利润 | net_profit_yoy 净利同比% | bps 每股净资产
 #   roe 净资产收益率% | ocf_per_share 每股经营现金流 | gross_margin 毛利率%
 #   industry 所属行业
-# 可用字段（衍生，update 时拉取/计算）:
-#   div_yield 股息率% | cagr_3y 近3年净利复合增速%
+# 注意：上面财务字段（roe/gross_margin/ocf_per_share 等）是缓存里 financials
+#   的【季度累计】口径（最新一期，如一季报）。季度 ROE 约为年化的 1/4，做
+#   质量门槛会严重误判——评估护城河请用下面 *_annual 的年报口径字段。
+# 可用字段（衍生，update 时按年报口径拉取/计算）:
+#   div_yield 股息率% | cagr_3y 近3年净利复合增速%（年报）
+#   roe_annual 年报ROE% | gross_margin_annual 年报毛利% | cash_conv 现金转化率(OCF/EPS)
 #   peg  = pe_ttm / 净利同比增速（单期，波动大，仅作对比）
 #   pegy = pe_ttm / (增速 + 股息率)  彼得林奇改进式；增速优先取 cagr_3y，
 #          缺失回退单期同比，股息率缺失按 0 计。<0.5 为极佳
@@ -30,6 +34,23 @@ filters:
   - {field: roe, op: ">=", value: 12}
   - {field: total_mcap, op: ">=", value: 5.0e+9}   # 50 亿以上
   # - {field: industry, op: contains, value: "医药"}
+
+# 护城河示例：年报口径高质量 + 估值合理 + 排除周期股
+# （取消上面 PEGY 示例、改用下面这整段即可）
+# exclude_industries:   # 按子串匹配，注意用精确词（"化学制品"而非"化学"，否则误伤化学制药）
+#   ["钢", "金属", "煤炭", "焦炭", "油气", "油服", "炼化", "化学原料", "化学制品",
+#    "化学纤维", "橡胶", "塑料", "水泥", "玻璃", "装修建材", "造纸", "房地产",
+#    "证券", "多元金融", "保险", "银行", "航运港口", "养殖", "种植", "渔业",
+#    "饲料", "农产品", "农化", "光伏设备", "风电设备"]
+# filters:
+#   - {field: roe_annual, op: ">=", value: 18}          # 年报 ROE，持续高资本回报
+#   - {field: gross_margin_annual, op: ">=", value: 35} # 定价权
+#   - {field: cash_conv, op: ">=", value: 0.7}          # 利润有现金支撑
+#   - {field: cagr_3y, op: ">=", value: 10}             # 仍在成长
+#   - {field: pegy, op: between, value: [0, 0.6]}       # 估值不贵
+#   - {field: total_mcap, op: ">=", value: 5.0e+9}
+# sort_by: pegy
+# ascending: true
 
 # 另一种经典示例：低估值 + 高 ROE + 营收正增长
 # filters:

@@ -84,6 +84,11 @@ def screen_frames(
     if config.get("exclude_bse", False):
         # 北交所代码以 8 / 4 / 92 开头
         df = df[~df["code"].str.match(r"^(8|4|92)")]
+    exclude_industries = config.get("exclude_industries")
+    if exclude_industries and "industry" in df.columns:
+        # 排除指定行业（按子串匹配，"金属" 可一并命中工业金属/贵金属…）
+        pat = "|".join(exclude_industries)
+        df = df[~df["industry"].str.contains(pat, na=False)]
 
     df = apply_filters(df, config.get("filters", []))
 

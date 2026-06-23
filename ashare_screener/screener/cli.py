@@ -37,9 +37,13 @@ def cmd_update(args: argparse.Namespace) -> int:
         if not args.no_metrics:
             metrics = fetch.fetch_metrics()
             cache.save_metrics(metrics)
-            n_div = int(metrics["div_yield"].notna().sum())
             n_cagr = int(metrics["cagr_3y"].notna().sum())
-            print(f"衍生指标: 股息率 {n_div} 只，CAGR {n_cagr} 只")
+            n_roe = int(metrics["roe_annual"].notna().sum())
+            n_div = int(metrics["div_yield"].notna().sum())
+            print(
+                f"衍生指标(年报口径): CAGR {n_cagr} 只，护城河质量 {n_roe} 只，"
+                f"股息率 {n_div} 只"
+            )
     return 0
 
 

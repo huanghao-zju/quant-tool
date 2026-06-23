@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from screener.cache import Cache
-from screener.fetch import latest_annual_year, report_dates
+from screener.fetch import _cagr_from, latest_annual_year, report_dates
 from screener.screen import add_derived, apply_filters, screen_frames
 
 
@@ -75,6 +75,17 @@ def test_screen_frames_exclude_bse(spot, financials):
     assert "839999" not in set(out["code"])
 
 
+def test_screen_frames_exclude_industries(spot, financials):
+    # "金属" 子串应剔除"有色金属"类，但不误伤"银行"/"电池"
+    financials = financials.copy()
+    financials.loc[financials["code"] == "300750", "industry"] = "有色金属"
+    config = {"exclude_st": False, "exclude_industries": ["金属", "白酒"], "filters": []}
+    out = screen_frames(spot, financials, config)
+    assert "300750" not in set(out["code"])  # 有色金属，剔除
+    assert "600519" not in set(out["code"])  # 白酒，剔除
+    assert "000001" in set(out["code"])      # 银行，保留
+
+
 def test_report_dates():
     dates = report_dates(dt.date(2026, 6, 12), n=4)
     assert dates == ["20260331", "20251231", "20250930", "20250630"]
@@ -125,6 +136,42 @@ def test_screen_frames_filters_on_pegy():
     out = screen_frames(spot, fin, config, metrics)
     # 甲 pegy=10/30≈0.33 命中；乙 pegy=40/30≈1.33 出局
     assert set(out["code"]) == {"000001"}
+
+
+def test_cagr_from_two_positive_ends_only():
+    end = pd.DataFrame({"code": ["A", "B", "C"], "net_profit": [200.0, 100.0, -5.0]})
+    start = pd.DataFrame({"code": ["A", "B", "C"], "net_profit": [100.0, -50.0, 10.0]})
+    out = _cagr_from(end, start, years=3).set_index("code")
+    # A: (200/100)^(1/3)-1 ≈ 25.99%；B 起点为负、C 终点为负 -> 均剔除
+    assert set(out.index) == {"A"}
+    assert round(out.loc["A", "cagr_3y"], 2) == 25.99
+
+
+def test_screen_frames_moat_filters_annual_fields():
+    spot = pd.DataFrame(
+        {"code": ["001", "002"], "name": ["甲", "乙"], "pe_ttm": [15.0, 15.0]}
+    )
+    fin = pd.DataFrame(
+        {"code": ["001", "002"], "name": ["甲", "乙"], "report_date": ["20251231"] * 2}
+    )
+    # 甲年报 ROE 高、现金转化好；乙 ROE 低 -> 只甲过护城河门
+    metrics = pd.DataFrame(
+        {
+            "code": ["001", "002"],
+            "roe_annual": [25.0, 6.0],
+            "cash_conv": [1.1, 1.1],
+        }
+    )
+    config = {
+        "exclude_st": False,
+        "filters": [
+            {"field": "roe_annual", "op": ">=", "value": 18},
+            {"field": "cash_conv", "op": ">=", "value": 0.7},
+        ],
+        "output_fields": ["code", "roe_annual"],
+    }
+    out = screen_frames(spot, fin, config, metrics)
+    assert set(out["code"]) == {"001"}
 
 
 def test_cache_roundtrip(tmp_path, spot, financials):
