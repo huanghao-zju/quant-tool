@@ -78,9 +78,26 @@ class Cache:
         except (pd.errors.DatabaseError, sqlite3.OperationalError):
             return None
 
+    # ---- 衍生指标：股息率 / 多年 CAGR（整表覆盖） ----
+
+    def save_metrics(self, df: pd.DataFrame) -> None:
+        df.to_sql("metrics", self.conn, if_exists="replace", index=False)
+        self._set_meta(
+            "metrics_fetched_at", dt.datetime.now().isoformat(timespec="seconds")
+        )
+
+    def load_metrics(self) -> pd.DataFrame | None:
+        if self._get_meta("metrics_fetched_at") is None:
+            return None
+        try:
+            return pd.read_sql("SELECT * FROM metrics", self.conn)
+        except (pd.errors.DatabaseError, sqlite3.OperationalError):
+            return None
+
     def status(self) -> dict[str, str | None]:
         return {
             "spot_fetched_at": self._get_meta("spot_fetched_at"),
             "financials_report_date": self._get_meta("financials_report_date"),
             "financials_fetched_at": self._get_meta("financials_fetched_at"),
+            "metrics_fetched_at": self._get_meta("metrics_fetched_at"),
         }
