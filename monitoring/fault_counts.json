@@ -15,5 +15,8 @@
  "jgb:10y": 0,
  "jgb:30y": 0,
  "cftc:jpy": 0,
- "jgb:20y": 0
+ "jgb:20y": 0,
+ "nyfed:srf": 0,
+ "cboe:cor3m": 0,
+ "mof:japan_flow": 0
 }

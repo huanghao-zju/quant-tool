@@ -81,8 +81,9 @@ def transition_msg(tr, ev, actions: dict) -> str:
              f"触发条件：{cond}",
              "当前读数：" + " | ".join(f"{k} {v}" for k, v in list(ev.readings.items())[:8]),
              f"➤ 你的既定动作：{action.strip()}",
-             f"慢变量看板分：{ev.dashboard_score}",
-             f"数据时间戳：{ev.date.date()}"]
+             f"慢变量看板分：{ev.dashboard_score}"]
+    lines += ev.v2
+    lines.append(f"数据时间戳：{ev.date.date()}")
     return "\n".join(lines)
 
 
@@ -92,6 +93,9 @@ def weekly_msg(ev, stage: int, stage_name: str, broken: list[str]) -> str:
     lines += [f"- {k}：{v}" for k, v in ev.readings.items()]
     hit = [k for k, v in ev.dashboard.items() if v]
     lines.append("看板命中：" + ("、".join(hit) if hit else "无"))
+    if ev.v2:
+        lines.append("v2信号：")
+        lines += [f"- {x}" for x in ev.v2]
     if broken:
         lines.append(f"⚠️ 数据源故障：{'、'.join(broken)}")
     lines.append(f"数据时间戳：{ev.date.date()}")
@@ -100,3 +104,19 @@ def weekly_msg(ev, stage: int, stage_name: str, broken: list[str]) -> str:
 
 def fault_msg(broken: list[str]) -> str:
     return "**[数据源故障]** 以下数据源连续3天拉取失败：" + "、".join(broken)
+
+
+_REMINDER_LABEL = {
+    "jgb_auction": "JGB 拍卖日（关注投标倍数<3.0、尾差走阔；若疲软请在 events.yaml 录入 weak_jgb_auction）",
+    "capex_guidance": "云厂商财报日（关注 AI capex 指引方向）",
+    "other": "事件提醒",
+}
+
+
+def reminder_msg(due: list[dict]) -> str:
+    lines = ["**[事件日历提醒]**"]
+    for r in due:
+        label = _REMINDER_LABEL.get(str(r.get("type")), _REMINDER_LABEL["other"])
+        when = "今日" if r.get("_when") == "today" else "明日"
+        lines.append(f"- {when} {r['date']}｜{label}" + (f"：{r['note']}" if r.get("note") else ""))
+    return "\n".join(lines)

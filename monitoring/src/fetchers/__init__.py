@@ -5,7 +5,7 @@ import logging
 
 import pandas as pd
 
-from . import cftc, fred, jgb, srf, yf
+from . import cftc, cor3m, fred, japan_flow, jgb, srf, yf
 
 log = logging.getLogger("fetchers")
 
@@ -47,10 +47,16 @@ def fetch_all(start: str | None = None, end: str | None = None) -> dict[str, pd.
     s = cftc.fetch(start=None, end=end)  # 需要2年历史算分位，start 不截断
     if s is not None:
         data["cftc_jpy"] = s
-    if start is None:  # SRF 端点只有近90天，回测模式跳过
+    if start is None:  # 以下 v2/近端指标仅 live 模式拉取，回测模式跳过
         s = srf.fetch()
         if s is not None:
             data["srf"] = s
+        s = cor3m.fetch()          # §2.3-16 隐含相关性
+        if s is not None:
+            data["cor3m"] = s
+        s = japan_flow.fetch()     # §2.3-18 日本对外证券投资周流量
+        if s is not None:
+            data["japan_flow"] = s
     # VIX 回退：FRED 失败用 ^VIX
     if "vix" not in data:
         s = yf.fetch("^VIX", start=start, end=end)

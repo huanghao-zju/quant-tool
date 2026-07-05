@@ -33,6 +33,23 @@ def load_yaml(name: str):
         return yaml.safe_load(f)
 
 
+def _due_reminders(cal: dict) -> list[dict]:
+    """返回今日/明日到期的日历提醒（东京时区，对齐 JGB 拍卖）。"""
+    import pandas as pd
+    today = pd.Timestamp.now(tz="Asia/Tokyo").normalize().tz_localize(None)
+    due = []
+    for r in (cal.get("reminders") or []):
+        try:
+            d = pd.Timestamp(r["date"])
+        except (KeyError, ValueError):
+            continue
+        if d == today:
+            due.append({**r, "_when": "today"})
+        elif d == today + pd.Timedelta(days=1):
+            due.append({**r, "_when": "tomorrow"})
+    return due
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
@@ -79,6 +96,12 @@ def main() -> int:
     # 数据源故障单独告警
     if broken and not args.weekly:
         notify.push(notify.fault_msg(broken), dry_run=args.dry_run)
+
+    # 事件日历提醒（§2.3-17 拍卖 / §2.3-19 capex）：命中今日或明日的条目
+    due = _due_reminders(load_yaml("calendar.yaml") or {})
+    if due:
+        notify.push(notify.reminder_msg(due), dry_run=args.dry_run)
+        pushed = True
 
     log.info("阶段=%s(%d) 看板分=%s 迁移=%s 推送=%s",
              STAGE_NAMES[sm.stage], sm.stage, ev.dashboard_score,

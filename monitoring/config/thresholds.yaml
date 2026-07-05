@@ -60,6 +60,15 @@ state_machine:
   usdjpy_30d_high_lookback: 30 # 橙色条件：从近30日高点单周急跌
   orange_drop_1w_yen: 5.0
 
+# ── §2.3 v2 指标（脆弱性/传导确认信号，不参与状态机分级）──────
+v2:
+  cor3m:
+    fragile_low: 9.0           # COR3M ≤ 此值 = 相关性极低=脆弱（2024崩盘前低点7.63）
+  japan_flow:
+    net_sell_oku: 0.0          # 对外中长期债周度净额 < 此值（亿日元）= 净卖出=回流确认
+  jgb_auction:
+    bid_to_cover_min: 3.0      # 投标倍数 <3.0 = 需求疲软（配合尾差恶化→黄色，手工录入）
+
 fetch:
   max_retries: 3
   stale_alert_days: 3          # 数据源连续3天失败 → 单独故障告警
