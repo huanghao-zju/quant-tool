@@ -12,7 +12,8 @@
  "fred:IORB": 0,
  "fred:PAYEMS": 0,
  "fred:SAHMREALTIME": 0,
- "jgb:10y": 2,
- "jgb:30y": 2,
- "cftc:jpy": 0
+ "jgb:10y": 0,
+ "jgb:30y": 0,
+ "cftc:jpy": 0,
+ "jgb:20y": 0
 }

@@ -15,7 +15,7 @@ from .base import http_get, record_fetch
 log = logging.getLogger("fetchers.jgb")
 
 URL_CURRENT = "https://www.mof.go.jp/jgbs/reference/interest_rate/jgbcm.csv"
-URL_ALL = "https://www.mof.go.jp/jgbs/reference/interest_rate/historical/jgbcm_all.csv"
+URL_ALL = "https://www.mof.go.jp/jgbs/reference/interest_rate/data/jgbcm_all.csv"
 
 # 和历 → 西历基准年（元年）
 _ERA = {"M": 1867, "T": 1911, "S": 1925, "H": 1988, "R": 2018}
@@ -47,16 +47,22 @@ def _parse_mof_csv(text: str, tenor_col: str) -> pd.Series | None:
 
 def fetch(tenor: str = "10", full_history: bool = False) -> pd.Series | None:
     """tenor: '10' | '20' | '30'（年）。返回收益率 %。"""
-    col = f"{tenor}Y"
-    s = None
-    for url in ([URL_ALL] if full_history else [URL_CURRENT, URL_ALL]):
+    col = f"{tenor}年"  # MOF CSV 列名为中/日文年限（如 "10年"），缺失值为 "-"
+    # 当月文件 jgbcm.csv 仅含当月（月初可能仅数行，不足以算单周/两周速度型），
+    # 全历史 jgbcm_all.csv 通常滞后数日。live 时两者拼接：全历史提供回溯窗口，
+    # 当月覆盖最新交易日。
+    parts = []
+    for url in ([URL_ALL] if full_history else [URL_ALL, URL_CURRENT]):
         r = http_get(url)
         if r is not None:
             r.encoding = "shift_jis"
-            s = _parse_mof_csv(r.text, col)
-            if s is not None and not s.empty:
-                break
-    if s is None or s.empty:
+            p = _parse_mof_csv(r.text, col)
+            if p is not None and not p.empty:
+                parts.append(p)
+    if parts:
+        s = pd.concat(parts)
+        s = s[~s.index.duplicated(keep="last")].sort_index()
+    else:
         s = _fetch_akshare(tenor)
     ok = s is not None and not s.empty
     record_fetch(f"jgb:{tenor}y", ok)
