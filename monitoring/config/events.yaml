@@ -1,0 +1,14 @@
+# 定性事件人工录入（SPEC §2.3-20）
+# 无法自动化的事件由用户手工记一行，状态机将其作为条件读入。
+# 格式：
+#   - date: "2026-07-10"
+#     type: fiscal_surprise        # 可选类型见下
+#     note: "高市财政包规模超预期"
+#
+# 支持的 type（状态机识别）：
+#   fiscal_surprise   → 黄色条件（财政包超预期）
+#   boj_intermeeting  → 橙色条件（BOJ会议间行动/加速加息信号）
+#   mof_intervention  → 橙色条件（MOF无预告大规模干预）
+#   other             → 仅记录，附在周报中
+
+events: []

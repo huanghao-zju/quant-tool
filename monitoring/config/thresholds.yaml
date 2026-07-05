@@ -1,0 +1,67 @@
+# 危机前置指标监控 — 阈值配置（SPEC §3）
+# 标定基准日：2026-07-04（USDJPY≈162, HY OAS≈263bp）。每季度人工复核。
+# 所有逻辑参数必须来自本文件，代码中不得出现魔法数字。
+
+calibration_date: "2026-07-04"
+
+# ── §3.1 日元通道（快状态机）──────────────────────────
+yen_channel:
+  usdjpy:
+    level_high: 165.0          # 贬值失控确认线（≥，需2收盘确认）
+    level_low: 150.0           # Mode A 深度确认（≤）
+    drop_1w_yen: 5.0           # 单周(5交易日)下跌>5円 = 急升预警（数值下跌=日元升值）
+    drop_2w_yen: 10.0          # 两周下跌>10円 = 2024年8月级别
+    week_days: 5
+    two_week_days: 10
+  jgb_10y:
+    level_pct: 2.3             # >2.3%
+    rise_1w_bp: 15             # 单周 +15bp
+  jgb_30y:
+    all_time_high: true        # 创发行以来新高
+    rise_1w_bp: 15
+  cftc_jpy:
+    crowding_pctile: 0.90      # 净空头处于2年分位 >90%（按空头绝对规模）
+    lookback_years: 2
+    unwind_2w_pct: 0.50        # 两周骤减 >50% = 平仓进行中
+    unwind_start_2w_pct: 0.30  # 两周骤减 >30% = 开始平仓（橙色条件）
+  nikkei:
+    daily_drop_pct: -5.0       # 单日 <-5%
+    joint_drop_pct: -3.0       # 与纳指同日 <-3%（红色合取条件）
+
+# ── §3.2 全局信用/宏观（慢变量看板，共9项）────────────
+dashboard:
+  hy_oas:
+    warn_bp: 350
+    distress_bp: 400           # 触发任何阶段直接跳红
+    tier2_bp: 600
+  vix:
+    close_level: 25.0
+    daily_jump: 8.0
+  sofr_iorb:
+    spread_positive_days: 5    # 利差转正且连续5交易日走阔
+  srf:
+    normal_max_usd_bn: 1.0     # 非季末/月末常态上限（十亿美元），>1个量级即异常
+    anomaly_multiple: 10.0
+  brent:
+    level_usd: 95.0
+  payrolls:
+    negative_months: 2         # 连续两个月环比负增长
+  sahm:
+    level: 0.50
+  owl_ares:
+    drop_5d_pct: -10.0         # 任一 5交易日 >-10%
+  bizd:
+    drawdown_52w_pct: -15.0    # 相对52周高点回撤 >15%
+
+# ── §4/§5 状态机与去抖 ────────────────────────────────
+state_machine:
+  confirm_closes: 2            # 日度水平型条件需连续2收盘确认；速度型即时生效
+  downgrade_quiet_days: 10     # 连续10交易日无当前阶段及以上条件 → 降一级
+  usdjpy_30d_high_lookback: 30 # 橙色条件：从近30日高点单周急跌
+  orange_drop_1w_yen: 5.0
+
+fetch:
+  max_retries: 3
+  stale_alert_days: 3          # 数据源连续3天失败 → 单独故障告警
+  history_days: 400            # 本地缓存历史长度（覆盖52周回撤+缓冲）
+  cftc_lookback_weeks: 110     # ~2年周度数据
