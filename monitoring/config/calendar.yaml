@@ -1,0 +1,18 @@
+# 事件日历提醒（SPEC §2.3-17 JGB拍卖 / §2.3-19 云厂商 capex）
+# 拍卖结果（投标倍数/尾差）与 capex 指引难以稳定自动抓取，此处仅做"到期提醒"：
+# 运行当日或次日命中的条目会推送提醒，提示用户手工关注对应结果。
+# 若拍卖确实疲软，请在 events.yaml 手工录入 type: weak_jgb_auction（接入黄色状态机）。
+#
+# 支持的 type：
+#   jgb_auction     → 20Y/30Y/40Y 拍卖日提醒（关注投标倍数<3.0、尾差走阔）
+#   capex_guidance  → 超大规模云厂商财报日提醒（关注 capex 指引方向）
+#   other           → 通用提醒
+
+reminders: []
+# 示例：
+#   - date: "2026-07-15"
+#     type: jgb_auction
+#     note: "30Y JGB 拍卖"
+#   - date: "2026-07-24"
+#     type: capex_guidance
+#     note: "MSFT FY26Q4 财报（关注 AI capex 指引）"

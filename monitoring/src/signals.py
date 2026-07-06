@@ -19,6 +19,7 @@ class Evaluation:
     orange: list[str] = field(default_factory=list)   # 阶段2
     red: list[str] = field(default_factory=list)      # 阶段3
     dashboard: dict[str, bool] = field(default_factory=dict)  # 慢变量看板 9 项
+    v2: list[str] = field(default_factory=list)               # v2 脆弱性/传导确认信号（不参与分级）
     readings: dict[str, str] = field(default_factory=dict)    # 现值快照
 
     @property
@@ -94,6 +95,9 @@ def evaluate(data: dict[str, pd.Series], cfg: dict, events: list[dict],
     for e in events:
         if str(e.get("type")) == "fiscal_surprise" and pd.Timestamp(e["date"]) <= asof:
             ev.yellow.append(f"事件录入：财政包超预期（{e['date']}：{e.get('note','')}）")
+        # §2.3-17 30Y 拍卖投标倍数<3.0 且尾差恶化（结果难自动化，走人工录入）
+        if str(e.get("type")) == "weak_jgb_auction" and pd.Timestamp(e["date"]) <= asof:
+            ev.yellow.append(f"事件录入：JGB 拍卖疲软（{e['date']}：{e.get('note','')}）")
 
     # ── 阶段2 · 橙色（政策被迫转向）─────────────────
     if usdjpy is not None and len(usdjpy) >= sm["usdjpy_30d_high_lookback"]:
@@ -128,9 +132,25 @@ def evaluate(data: dict[str, pd.Series], cfg: dict, events: list[dict],
     # ── 慢变量看板（9 项，不参与分级）────────────────
     ev.dashboard = _dashboard(d, db, asof)
 
+    # ── v2 脆弱性/传导确认信号（§2.3，不参与分级）──────
+    ev.v2 = _v2_signals(d, cfg.get("v2", {}))
+
     # ── 现值快照 ────────────────────────────────────
     _readings(ev, d, yc)
     return ev
+
+
+def _v2_signals(d: dict, v2: dict) -> list[str]:
+    out: list[str] = []
+    if not v2:
+        return out
+    cor3m = d.get("cor3m")
+    if cor3m is not None and (c := _last(cor3m)) is not None and c <= v2["cor3m"]["fragile_low"]:
+        out.append(f"⚠️ 隐含相关性 COR3M {c:.2f} ≤ {v2['cor3m']['fragile_low']}（脆弱低位，2024崩盘前低点7.63）")
+    jf = d.get("japan_flow")
+    if jf is not None and (v := _last(jf)) is not None and v < v2["japan_flow"]["net_sell_oku"]:
+        out.append(f"⚠️ 日本对外中长债周度净卖出 {v:,.0f} 亿円（资金回流=传导确认）")
+    return out
 
 
 def _pct_chg(s: pd.Series, periods: int) -> float | None:
@@ -215,6 +235,8 @@ def _readings(ev: Evaluation, d: dict, yc: dict) -> None:
         "sahm": ("Sahm", "{:.2f}"), "bizd": ("BIZD", "{:.2f}"),
         "owl": ("OWL", "{:.2f}"), "ares": ("ARES", "{:.2f}"),
         "srf": ("SRF用量", "{:.1f}bn"),
+        "cor3m": ("COR3M隐含相关性", "{:.2f}"),
+        "japan_flow": ("对外中长债周净额", "{:,.0f}亿円"),
     }
     for k, (name, f) in fmt.items():
         v = _last(d.get(k))
