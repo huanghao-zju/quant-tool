@@ -47,6 +47,8 @@ jobs:
           FLAGS=""
           if [ "${{ github.event.schedule }}" = "0 23 * * 5" ] || [ "${{ inputs.weekly }}" = "true" ]; then
             FLAGS="--weekly"
+          elif [ "${{ github.event.schedule }}" = "30 7 * * 1-5" ]; then
+            FLAGS="--heartbeat"   # 工作日东京收盘后一跑发平安报（存活探测）
           fi
           python -m src.main $FLAGS
 
@@ -54,6 +56,18 @@ jobs:
         run: |
           git config user.name "crisis-monitor-bot"
           git config user.email "bot@users.noreply.github.com"
-          git add state.json fault_counts.json dashboard_score.json || true
+          git add state.json fault_counts.json dashboard_score.json alerted_faults.json || true
           git diff --cached --quiet || git commit -m "chore: update state $(date -u +%F)"
           git push
+
+      # 任务失败告警：抓"跑了但报错"的失败模式（SPEC §5.5 防止沉默的坏掉）。
+      # "任务根本没被触发"的模式由平安报的缺席兜底。
+      - name: Notify on failure
+        if: failure()
+        env:
+          PUSH_WEBHOOK_URL: ${{ secrets.PUSH_WEBHOOK_URL }}
+          PUSH_WEBHOOK_SECRET: ${{ secrets.PUSH_WEBHOOK_SECRET }}
+        run: |
+          python -c "from src.notify import push; push('**[监控任务失败]** ⚠️ crisis-monitor GitHub Actions 运行失败，请查看日志：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}')" || \
+            curl -s -X POST "$PUSH_WEBHOOK_URL" -H 'Content-Type: application/json' \
+              -d '{"msg_type":"text","content":{"text":"[监控任务失败] crisis-monitor Actions 运行失败，请查看 GitHub Actions 日志"}}'

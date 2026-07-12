@@ -4,6 +4,7 @@
     python -m src.main             # 正常运行
     python -m src.main --dry-run   # 不真实推送
     python -m src.main --weekly    # 强制发周报（配合周六 cron）
+    python -m src.main --heartbeat # 平安报（工作日早间一跑，确认监控存活）
 """
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ from . import notify
 
 ROOT = Path(__file__).parents[1]
 DASH_FILE = Path("dashboard_score.json")
+ALERTED_FILE = Path("alerted_faults.json")  # 已告警的故障源集合（去抖，避免每日刷屏）
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 log = logging.getLogger("main")
@@ -54,6 +56,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--weekly", action="store_true")
+    ap.add_argument("--heartbeat", action="store_true")
     args = ap.parse_args()
 
     cfg = load_yaml("thresholds.yaml")
@@ -93,14 +96,25 @@ def main() -> int:
         notify.push(notify.weekly_msg(ev, sm.stage, STAGE_NAMES[sm.stage], broken),
                     dry_run=args.dry_run)
         pushed = True
-    # 数据源故障单独告警
-    if broken and not args.weekly:
-        notify.push(notify.fault_msg(broken), dry_run=args.dry_run)
+    # 数据源故障告警（去抖：仅对"新变坏"的源推送一次，避免每日刷屏）
+    already = set(json.loads(ALERTED_FILE.read_text())) if ALERTED_FILE.exists() else set()
+    newly_broken = [s for s in broken if s not in already]
+    if newly_broken and not args.weekly:  # 周报已含 broken 列表，不重复推
+        notify.push(notify.fault_msg(newly_broken), dry_run=args.dry_run)
+        pushed = True
+    if not args.dry_run:
+        ALERTED_FILE.write_text(json.dumps(broken))  # 恢复的源移出集合，将来再坏可再次告警
 
     # 事件日历提醒（§2.3-17 拍卖 / §2.3-19 capex）：命中今日或明日的条目
     due = _due_reminders(load_yaml("calendar.yaml") or {})
     if due:
         notify.push(notify.reminder_msg(due), dry_run=args.dry_run)
+        pushed = True
+
+    # 平安报（存活探测）：仅工作日早间一跑带 --heartbeat；当天已有其他推送则跳过
+    if args.heartbeat and not args.weekly and not pushed:
+        notify.push(notify.heartbeat_msg(ev, sm.stage, STAGE_NAMES[sm.stage], broken),
+                    dry_run=args.dry_run)
         pushed = True
 
     log.info("阶段=%s(%d) 看板分=%s 迁移=%s 推送=%s",
