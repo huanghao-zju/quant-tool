@@ -1,7 +1,9 @@
 {
- "stage": 0,
- "entered": null,
+ "stage": 2,
+ "entered": "2026-08-03",
  "quiet_days": 0,
- "snapshot": [],
- "last_eval_date": "2026-07-31"
+ "snapshot": [
+  "USDJPY 单周急跌 6.2円（30日高点 163.86 → 157.40）"
+ ],
+ "last_eval_date": "2026-08-03"
 }
