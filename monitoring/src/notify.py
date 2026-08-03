@@ -106,6 +106,14 @@ def fault_msg(broken: list[str]) -> str:
     return "**[数据源故障]** 以下数据源连续3天拉取失败：" + "、".join(broken)
 
 
+def heartbeat_msg(ev, stage: int, stage_name: str, broken: list[str]) -> str:
+    """平安报（存活探测）：一行摘要，确认监控当日正常运行。"""
+    tail = f"｜⚠️ 数据源故障：{'、'.join(broken)}" if broken else "｜数据源正常"
+    v2 = f"｜v2信号 {len(ev.v2)}" if ev.v2 else ""
+    return (f"**[平安报] ✅ 监控正常运行** 阶段 {stage_name}（{stage}）"
+            f"｜看板分 {ev.dashboard_score}{v2}{tail}｜数据时间戳 {ev.date.date()}")
+
+
 _REMINDER_LABEL = {
     "jgb_auction": "JGB 拍卖日（关注投标倍数<3.0、尾差走阔；若疲软请在 events.yaml 录入 weak_jgb_auction）",
     "capex_guidance": "云厂商财报日（关注 AI capex 指引方向）",
