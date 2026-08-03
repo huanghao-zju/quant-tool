@@ -71,8 +71,10 @@ def _chg(s: pd.Series, periods: int) -> float | None:
 def evaluate(data: dict[str, pd.Series], cfg: dict, events: list[dict],
              asof: pd.Timestamp | None = None) -> Evaluation:
     if asof is None:
+        # yfinance 外汇等会给出次日/未来戳，asof 上限截到运行当天，避免评估日期超前。
+        today = pd.Timestamp.utcnow().tz_localize(None).normalize()
         candidates = [s.index[-1] for s in data.values() if s is not None and not s.empty]
-        asof = max(candidates) if candidates else pd.Timestamp.utcnow().tz_localize(None).normalize()
+        asof = min(max(candidates), today) if candidates else today
     asof = pd.Timestamp(asof)
     d = {k: _cut(v, asof) for k, v in data.items()}
     yc, db, sm = cfg["yen_channel"], cfg["dashboard"], cfg["state_machine"]
