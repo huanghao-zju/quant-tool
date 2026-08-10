@@ -117,17 +117,26 @@ def evaluate(data: dict[str, pd.Series], cfg: dict, events: list[dict],
         ev.orange.append(f"CFTC 日元净空头从极值两周骤减 {unwind:.0%}")
 
     # ── 阶段3 · 红色（Mode A：套息平仓 + 全球传导）──
+    # 全球传导确认信号（VIX跳升 / 日经+纳指同日崩），两条红色路径共用。
+    vix_jump = vix is not None and (j := _chg(vix, 1)) is not None and j > db["vix"]["daily_jump"]
+    joint = (nikkei is not None and nasdaq is not None
+             and (nk := _pct_chg(nikkei, 1)) is not None and (nq := _pct_chg(nasdaq, 1)) is not None
+             and nk < yc["nikkei"]["joint_drop_pct"] and nq < yc["nikkei"]["joint_drop_pct"])
+    # USDJPY 近一周仍在加速下行（未企稳）——区分失控级联 vs 有序干预平仓。
+    drop1w_now = _chg(usdjpy, c["week_days"]) if usdjpy is not None else None
+    usdjpy_still_falling = (drop1w_now is not None
+                            and -drop1w_now > yc["cftc_jpy"]["unwind_confirm_drop_1w_yen"])
     if usdjpy is not None:
         drop2w = _chg(usdjpy, c["two_week_days"])
-        if drop2w is not None and -drop2w > c["drop_2w_yen"]:
-            vix_jump = vix is not None and (j := _chg(vix, 1)) is not None and j > db["vix"]["daily_jump"]
-            joint = (nikkei is not None and nasdaq is not None
-                     and (nk := _pct_chg(nikkei, 1)) is not None and (nq := _pct_chg(nasdaq, 1)) is not None
-                     and nk < yc["nikkei"]["joint_drop_pct"] and nq < yc["nikkei"]["joint_drop_pct"])
-            if vix_jump or joint:
-                ev.red.append(f"USDJPY 两周下跌 {-drop2w:.1f}円 且 {'VIX单日跳升' if vix_jump else '日经+纳指同日<-3%'}")
+        if drop2w is not None and -drop2w > c["drop_2w_yen"] and (vix_jump or joint):
+            ev.red.append(f"USDJPY 两周下跌 {-drop2w:.1f}円 且 {'VIX单日跳升' if vix_jump else '日经+纳指同日<-3%'}")
     if unwind is not None and unwind > yc["cftc_jpy"]["unwind_2w_pct"]:
-        ev.red.append(f"CFTC 日元净空头两周骤减 {unwind:.0%}（>50%，平仓进行中）")
+        # 平仓幅度达标后需协同确认「失控」：VIX跳升/股市同日崩/日元仍在加速升值。
+        # 否则（如联合干预导致的有序强制平仓、日元已企稳）不跳红。
+        if vix_jump or joint or usdjpy_still_falling:
+            confirm = ("VIX单日跳升" if vix_jump else "日经+纳指同日崩" if joint
+                       else f"USDJPY近一周仍跌{-drop1w_now:.1f}円")
+            ev.red.append(f"CFTC 日元净空头两周骤减 {unwind:.0%}（>50%）且{confirm}（平仓失控进行中）")
     if hy is not None and _confirmed(hy, lambda x: x > db["hy_oas"]["distress_bp"] / 100.0, n_confirm):
         ev.red.append(f"HY OAS 突破 {db['hy_oas']['distress_bp']}bp（现值 {_last(hy)*100:.0f}bp）→ 任何阶段直接跳红")
 

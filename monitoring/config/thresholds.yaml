@@ -24,6 +24,9 @@ yen_channel:
     lookback_years: 2
     unwind_2w_pct: 0.50        # 两周骤减 >50% = 平仓进行中
     unwind_start_2w_pct: 0.30  # 两周骤减 >30% = 开始平仓（橙色条件）
+    # 平仓达标后仍需协同确认「失控」而非「有序干预平仓」：VIX跳升/股市同日崩/
+    # USDJPY 近一周仍在加速下行（单周跌 >此值）。避免联合干预导致的有序强制平仓误报红色。
+    unwind_confirm_drop_1w_yen: 1.0
   nikkei:
     daily_drop_pct: -5.0       # 单日 <-5%
     joint_drop_pct: -3.0       # 与纳指同日 <-3%（红色合取条件）
