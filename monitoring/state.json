@@ -1,9 +1,9 @@
 {
- "stage": 3,
- "entered": "2026-08-10",
- "quiet_days": 5,
+ "stage": 2,
+ "entered": "2026-08-03",
+ "quiet_days": 0,
  "snapshot": [
-  "CFTC 日元净空头两周骤减 70%（>50%，平仓进行中）"
+  "CFTC 日元净空头从极值两周骤减 74%"
  ],
  "last_eval_date": "2026-08-17"
 }
