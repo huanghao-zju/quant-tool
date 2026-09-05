@@ -52,19 +52,23 @@ class StateMachine:
         }, ensure_ascii=False, indent=1))
 
     def step(self, ev: Evaluation, quiet_days_limit: int) -> Transition | None:
-        """输入一天的评估结果，返回迁移（若发生）。每个交易日调用一次。"""
+        """输入一天的评估结果，返回迁移（若发生）。每日可多次调用：
+        升级同日放行（美股收盘后一跑不得被幂等挡掉，速度即信号）；
+        降级计数每个交易日只累计一次。"""
         date = str(ev.date.date())
-        if self.last_eval_date == date:
-            return None  # 同日重复运行，幂等
+        same_day = self.last_eval_date == date
         self.last_eval_date = date
 
         target = ev.highest_stage
-        if target > self.stage:  # 升级/跳级
+        if target > self.stage:  # 升级/跳级：同日重复评估也放行
             tr = Transition(date, self.stage, target, "upgrade",
                             ev.conditions_at_or_above(target))
             self.stage, self.entered = target, date
             self.quiet_days, self.snapshot = 0, tr.conditions
             return tr
+
+        if same_day:
+            return None  # 同日无升级 → 幂等（降级计数不重复累计）
 
         if self.stage > 0:  # 降级计数
             if ev.conditions_at_or_above(self.stage):

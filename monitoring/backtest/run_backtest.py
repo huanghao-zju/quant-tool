@@ -81,6 +81,11 @@ def load_data(w: dict) -> dict[str, pd.Series]:
             data[key] = s.loc[warmup:end]
     s = _cached(f"{tag}_cftc", lambda: cftc.fetch(start=w["cftc_start"], end=end))
     if s is not None:
+        # 防前视偏差：CFTC 周五才发布周二数据，回放时把可见日期推后发布时滞，
+        # 保证任一评估日只能看到当时已公开的报告（速度计算仍按报告序列，SPEC §9）。
+        cfg = yaml.safe_load(open(ROOT / "config" / "thresholds.yaml", encoding="utf-8"))
+        lag = cfg["fetch"]["cftc_publication_lag_days"]
+        s = pd.Series(s.values, index=s.index + pd.Timedelta(days=lag))
         data["cftc_jpy"] = s
     return data
 

@@ -94,6 +94,13 @@ def evaluate(data: dict[str, pd.Series], cfg: dict, events: list[dict],
         j10_hi = _confirmed(jgb10, lambda x: x > yc["jgb_10y"]["level_pct"], n_confirm)
         if j30_ath and j10_hi:
             ev.yellow.append(f"30Y JGB 创新高（{_last(jgb30):.3f}%）且 10Y>{yc['jgb_10y']['level_pct']}%（{_last(jgb10):.3f}%）")
+    # JGB 速度型（§3.1）：单周 +15bp = 利率失控印记（速度优先于水平，即时生效）
+    for s_jgb, k_cfg, label in ((jgb10, "jgb_10y", "10Y"), (jgb30, "jgb_30y", "30Y")):
+        if s_jgb is None:
+            continue
+        rise = _chg(s_jgb, c["week_days"])
+        if rise is not None and rise * 100 > yc[k_cfg]["rise_1w_bp"]:
+            ev.yellow.append(f"{label} JGB 单周 +{rise*100:.0f}bp（>{yc[k_cfg]['rise_1w_bp']}bp）")
     for e in events:
         if str(e.get("type")) == "fiscal_surprise" and pd.Timestamp(e["date"]) <= asof:
             ev.yellow.append(f"事件录入：财政包超预期（{e['date']}：{e.get('note','')}）")
@@ -146,6 +153,14 @@ def evaluate(data: dict[str, pd.Series], cfg: dict, events: list[dict],
     # ── v2 脆弱性/传导确认信号（§2.3，不参与分级）──────
     ev.v2 = _v2_signals(d, cfg.get("v2", {}))
 
+    # ── 上下文确认信号（§3.1/§3.2 已定义阈值，不参与分级）──
+    if usdjpy is not None and _last(usdjpy) <= c["level_low"]:
+        ev.v2.append(f"⚠️ USDJPY {_last(usdjpy):.1f} ≤ {c['level_low']}（Mode A 深度确认区）")
+    if nikkei is not None and (nk1 := _pct_chg(nikkei, 1)) is not None and nk1 < yc["nikkei"]["daily_drop_pct"]:
+        ev.v2.append(f"⚠️ 日经单日 {nk1:.1f}%（<{yc['nikkei']['daily_drop_pct']}%，传导冲击）")
+    if hy is not None and _last(hy) * 100 >= db["hy_oas"]["tier2_bp"]:
+        ev.v2.append(f"⚠️ HY OAS {_last(hy)*100:.0f}bp ≥ Tier2 {db['hy_oas']['tier2_bp']}bp（重估全部结论）")
+
     # ── 现值快照 ────────────────────────────────────
     _readings(ev, d, yc)
     return ev
@@ -178,7 +193,7 @@ def _cftc_unwind(s: pd.Series | None, c: dict) -> float | None:
     if shorts.iloc[-1] < 0 or len(shorts) < 8:
         return None
     recent = shorts.iloc[-3:]            # 两周 ≈ 3 个周度报告点（含当期）
-    ref = float(recent.iloc[0])
+    ref = float(recent.max())            # 两周窗口内峰值（原用首点，渐进式平仓时基准自削会中途熄火）
     if ref <= 0:
         return None
     pctile = float((shorts < ref).mean())  # ref 在全样本（约2年）中的分位

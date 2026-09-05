@@ -8,8 +8,8 @@ calibration_date: "2026-07-04"
 yen_channel:
   usdjpy:
     level_high: 165.0          # 贬值失控确认线（≥，需2收盘确认）
-    level_low: 150.0           # Mode A 深度确认（≤）
-    drop_1w_yen: 5.0           # 单周(5交易日)下跌>5円 = 急升预警（数值下跌=日元升值）
+    level_low: 150.0           # Mode A 深度确认（≤，上下文信号）
+    # 单周急跌阈值见 state_machine.orange_drop_1w_yen（橙色条件，数值下跌=日元升值）
     drop_2w_yen: 10.0          # 两周下跌>10円 = 2024年8月级别
     week_days: 5
     two_week_days: 10
@@ -77,3 +77,4 @@ fetch:
   stale_alert_days: 3          # 数据源连续3天失败 → 单独故障告警
   history_days: 400            # 本地缓存历史长度（覆盖52周回撤+缓冲）
   cftc_lookback_weeks: 110     # ~2年周度数据
+  cftc_publication_lag_days: 3 # 周五发布周二数据；回测中按此时滞控制可见性（防前视偏差）

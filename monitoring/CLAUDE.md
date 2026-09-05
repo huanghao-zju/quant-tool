@@ -1,6 +1,7 @@
 # crisis-monitor
 
 需求唯一权威来源：`SPEC.md`。每次会话先读它。
+人话版速读手册（指标含义/消息解读/人工职责）：`docs/GUIDE.md`。
 
 ## 编码约定
 - Python 3.11+，依赖仅 `requests` `pandas` `yfinance` `pyyaml`。
