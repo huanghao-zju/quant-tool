@@ -17,6 +17,7 @@ FRED_SERIES = {
     "iorb": "IORB",
     "payems": "PAYEMS",
     "sahm": "SAHMREALTIME",
+    "fed_upper": "DFEDTARU",   # 联储目标区间上限（政策错误复合信号用）
 }
 YF_TICKERS = {
     "usdjpy": "JPY=X",
@@ -26,6 +27,7 @@ YF_TICKERS = {
     "owl": "OWL",
     "ares": "ARES",
     "bizd": "BIZD",
+    "move": "^MOVE",           # ICE 美债波动率指数（债市恐慌先于股市）
 }
 
 
