@@ -176,6 +176,30 @@ def _v2_signals(d: dict, v2: dict) -> list[str]:
     jf = d.get("japan_flow")
     if jf is not None and (v := _last(jf)) is not None and v < v2["japan_flow"]["net_sell_oku"]:
         out.append(f"⚠️ 日本对外中长债周度净卖出 {v:,.0f} 亿円（资金回流=传导确认）")
+    # USDJPY 已实现波动率（自身历史分位口径）：区分平稳/失控 regime 的体征
+    u = d.get("usdjpy")
+    if u is not None and "usdjpy_vol" in v2 and len(u) > v2["usdjpy_vol"]["window_days"] + 60:
+        vol = (u.pct_change().rolling(v2["usdjpy_vol"]["window_days"]).std()
+               * (252 ** 0.5) * 100).dropna()
+        if not vol.empty:
+            cur, pct = float(vol.iloc[-1]), float((vol < vol.iloc[-1]).mean())
+            if pct >= v2["usdjpy_vol"]["pctile"]:
+                out.append(f"⚠️ USDJPY {v2['usdjpy_vol']['window_days']}日已实现波动 "
+                           f"{cur:.1f}%（历史 {pct:.0%} 分位，失控风险体征）")
+    # MOVE 债市波动率：利率市场压力先于股市恐慌
+    mv = d.get("move")
+    if mv is not None and "move" in v2 and (m := _last(mv)) is not None and m > v2["move"]["level"]:
+        out.append(f"⚠️ MOVE 债市波动率 {m:.0f} > {v2['move']['level']:.0f}（利率市场压力）")
+    # 政策错误复合信号（SPEC §3.2 非农行备注）：衰退信号出现时联储仍在加息
+    pay, fed = d.get("payems"), d.get("fed_upper")
+    if (pay is not None and fed is not None and "policy_error" in v2
+            and len(pay) >= v2["policy_error"]["negative_months"] + 1):
+        neg = bool((pay.diff().dropna().iloc[-v2["policy_error"]["negative_months"]:] < 0).all())
+        past = fed.loc[:fed.index[-1] - pd.Timedelta(days=v2["policy_error"]["hike_lookback_days"])]
+        hiking = (not past.empty) and float(fed.iloc[-1]) > float(past.iloc[-1])
+        if neg and hiking:
+            out.append(f"⚠️ 政策错误窗口：非农连续{v2['policy_error']['negative_months']}月负增长"
+                       f"且美联储仍在加息（复合信号）")
     return out
 
 
@@ -263,6 +287,7 @@ def _readings(ev: Evaluation, d: dict, yc: dict) -> None:
         "srf": ("SRF用量", "{:.1f}bn"),
         "cor3m": ("COR3M隐含相关性", "{:.2f}"),
         "japan_flow": ("对外中长债周净额", "{:,.0f}亿円"),
+        "move": ("MOVE债市波动", "{:.0f}"),
     }
     for k, (name, f) in fmt.items():
         v = _last(d.get(k))

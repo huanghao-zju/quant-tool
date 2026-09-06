@@ -71,6 +71,14 @@ v2:
     net_sell_oku: 0.0          # 对外中长期债周度净额 < 此值（亿日元）= 净卖出=回流确认
   jgb_auction:
     bid_to_cover_min: 3.0      # 投标倍数 <3.0 = 需求疲软（配合尾差恶化→黄色，手工录入）
+  usdjpy_vol:
+    window_days: 10            # 已实现波动窗口（年化）
+    pctile: 0.90               # 处于自身历史 ≥90% 分位 = 失控风险体征
+  move:
+    level: 120.0               # MOVE 债市波动率 > 此值 = 利率市场压力
+  policy_error:
+    hike_lookback_days: 90     # 联储目标上限高于90天前 = 仍在加息
+    negative_months: 2         # 非农连续负增长月数（与 dashboard.payrolls 口径一致）
 
 fetch:
   max_retries: 3
