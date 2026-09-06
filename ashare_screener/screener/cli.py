@@ -5,6 +5,7 @@
     python -m screener screen                 # 按 config.yaml 筛选
     python -m screener screen -o result.csv   # 结果另存 CSV
     python -m screener status                 # 查看缓存数据新鲜度
+    python -m screener ui                     # 启动浏览器界面
 """
 
 from __future__ import annotations
@@ -72,6 +73,25 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ui(args: argparse.Namespace) -> int:
+    import os
+    import subprocess
+
+    app = Path(__file__).resolve().parent / "app.py"
+    cmd = [
+        sys.executable, "-m", "streamlit", "run", str(app),
+        "--server.port", str(args.port),
+        # 默认只监听本机：Streamlit 默认绑 0.0.0.0，会把持仓筛选结果暴露到局域网/公网
+        "--server.address", args.host,
+        "--browser.gatherUsageStats", "false",
+    ]
+    if args.headless:
+        cmd += ["--server.headless", "true"]
+    # 全局 --db 与 -c 通过环境变量传给 Streamlit 子进程
+    env = {**os.environ, "SCREENER_DB": str(args.db), "SCREENER_CONFIG": str(args.config)}
+    return subprocess.call(cmd, env=env)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="screener", description="A 股量化筛选工具")
     parser.add_argument("--db", default=None, help="SQLite 缓存路径，默认 data/screener.db")
@@ -92,6 +112,15 @@ def main(argv: list[str] | None = None) -> int:
 
     p_status = sub.add_parser("status", help="查看缓存新鲜度")
     p_status.set_defaults(func=cmd_status)
+
+    p_ui = sub.add_parser("ui", help="启动 Streamlit 浏览器界面")
+    p_ui.add_argument("-c", "--config", default=DEFAULT_CONFIG, help="筛选配置 YAML（界面初始值）")
+    p_ui.add_argument("--port", type=int, default=8501)
+    p_ui.add_argument(
+        "--host", default="localhost", help="监听地址，默认仅本机；填 0.0.0.0 可局域网访问"
+    )
+    p_ui.add_argument("--headless", action="store_true", help="不自动打开浏览器")
+    p_ui.set_defaults(func=cmd_ui)
 
     args = parser.parse_args(argv)
     if args.db is None:
