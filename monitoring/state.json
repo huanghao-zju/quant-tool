@@ -1,9 +1,9 @@
 {
- "stage": 1,
- "entered": "2026-09-03",
- "quiet_days": 2,
+ "stage": 2,
+ "entered": "2026-09-07",
+ "quiet_days": 0,
  "snapshot": [
-  "CFTC 日元净空头从极值两周骤减 74%"
+  "USDJPY 单周急跌 5.6円（30日高点 163.86 → 154.48）"
  ],
- "last_eval_date": "2026-09-05"
+ "last_eval_date": "2026-09-07"
 }

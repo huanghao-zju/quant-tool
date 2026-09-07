@@ -18,5 +18,7 @@
  "jgb:20y": 0,
  "nyfed:srf": 0,
  "cboe:cor3m": 0,
- "mof:japan_flow": 0
+ "mof:japan_flow": 0,
+ "fred:DFEDTARU": 0,
+ "yf:^MOVE": 0
 }
