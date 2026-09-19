@@ -184,3 +184,42 @@ def test_exported_yaml_is_loadable(env):
     assert cfg["top"] == 50
     assert all("_id" not in f for f in cfg["filters"])
     assert {"field", "op", "value"} == set(cfg["filters"][0])
+
+
+def test_ui_command_is_headless_and_local_only():
+    """ui 子命令必须 headless（否则首次运行卡在 Email 引导提示）且默认只监听本机。"""
+    from screener.cli import main, ui_command
+
+    captured = {}
+
+    def fake_call(cmd, env=None):
+        captured["cmd"], captured["env"] = cmd, env
+        return 0
+
+    import subprocess
+
+    real = subprocess.call
+    subprocess.call = fake_call
+    try:
+        main(["--db", "/tmp/x.db", "ui", "-c", "/tmp/x.yaml", "--port", "8600", "--headless"])
+    finally:
+        subprocess.call = real
+
+    cmd = captured["cmd"]
+    assert "--server.headless" in cmd and cmd[cmd.index("--server.headless") + 1] == "true"
+    assert cmd[cmd.index("--server.address") + 1] == "localhost"
+    assert cmd[cmd.index("--server.port") + 1] == "8600"
+    assert cmd[cmd.index("--browser.gatherUsageStats") + 1] == "false"
+    # --db / -c 通过环境变量传给子进程
+    assert captured["env"]["SCREENER_DB"] == "/tmp/x.db"
+    assert captured["env"]["SCREENER_CONFIG"] == "/tmp/x.yaml"
+
+
+def test_ui_command_respects_host_override():
+    import argparse
+
+    from screener.cli import ui_command
+
+    args = argparse.Namespace(port=8501, host="0.0.0.0", headless=True)
+    cmd = ui_command(args)
+    assert cmd[cmd.index("--server.address") + 1] == "0.0.0.0"

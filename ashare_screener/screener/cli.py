@@ -73,23 +73,37 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_ui(args: argparse.Namespace) -> int:
-    import os
-    import subprocess
-
+def ui_command(args: argparse.Namespace) -> list[str]:
+    """拼 streamlit 启动命令。"""
     app = Path(__file__).resolve().parent / "app.py"
-    cmd = [
+    return [
         sys.executable, "-m", "streamlit", "run", str(app),
         "--server.port", str(args.port),
         # 默认只监听本机：Streamlit 默认绑 0.0.0.0，会把持仓筛选结果暴露到局域网/公网
         "--server.address", args.host,
         "--browser.gatherUsageStats", "false",
+        # 始终 headless。非 headless 时 Streamlit 首次运行会卡在 "Email:" 引导
+        # 提示上等输入，服务起不来；浏览器改由下面自己打开。
+        "--server.headless", "true",
     ]
-    if args.headless:
-        cmd += ["--server.headless", "true"]
+
+
+def cmd_ui(args: argparse.Namespace) -> int:
+    import os
+    import subprocess
+    import threading
+    import webbrowser
+
+    url = f"http://{args.host}:{args.port}"
+    if not args.headless:
+        threading.Timer(2.0, webbrowser.open, args=(url,)).start()
+    print(f"筛选器界面: {url}   (Ctrl-C 退出)")
     # 全局 --db 与 -c 通过环境变量传给 Streamlit 子进程
     env = {**os.environ, "SCREENER_DB": str(args.db), "SCREENER_CONFIG": str(args.config)}
-    return subprocess.call(cmd, env=env)
+    try:
+        return subprocess.call(ui_command(args), env=env)
+    except KeyboardInterrupt:
+        return 0
 
 
 def main(argv: list[str] | None = None) -> int:
