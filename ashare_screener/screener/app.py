@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import io
 import os
@@ -110,13 +111,28 @@ def load_frames(db_path: str, fetched_at: str | None, report_date: str | None):
     return spot, fin, metrics
 
 
-def run_update(db_path: str, spot_only: bool) -> None:
+def _fetch_spot_with_notices() -> tuple[pd.DataFrame, str]:
+    """fetch_spot 在切换备用数据源时只 print 提示，终端能看见、浏览器看不见。
+    这里把它的输出接过来，交给调用方显示在页面上。"""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        spot = fetch.fetch_spot()
+    return spot, buf.getvalue().strip()
+
+
+def run_update(db_path: str, spot_only: bool) -> bool:
+    """返回是否成功。失败时在页面上给出可读的错误，而不是抛栈。"""
     cache = Cache(db_path)
     try:
         with st.status("拉取行情快照…", expanded=True) as status:
-            spot = fetch.fetch_spot()
+            spot, notices = _fetch_spot_with_notices()
             cache.save_spot(spot)
             st.write(f"行情快照 {len(spot)} 只")
+            # 成功后会 st.rerun()，此刻渲染的东西会被刷掉；
+            # 数据源提示存进 session_state，由 main() 在重跑后显示。
+            st.session_state.spot_notice = notices or None
+            if notices:
+                st.warning(notices)
             if not spot_only:
                 status.update(label="拉取财务数据…")
                 fin = fetch.fetch_latest_financials()
@@ -127,9 +143,17 @@ def run_update(db_path: str, spot_only: bool) -> None:
                 cache.save_metrics(metrics)
                 st.write(f"衍生指标 {len(metrics)} 只")
             status.update(label="更新完成", state="complete")
+    except Exception as e:
+        st.error(
+            f"更新失败：{type(e).__name__}: {e}\n\n"
+            "东方财富接口不稳定或本机网络不通时会这样，稍后重试即可；"
+            "持续失败请在终端跑 `python -m screener update --spot-only` 看完整报错。"
+        )
+        return False
     finally:
         cache.close()
     load_frames.clear()
+    return True
 
 
 # ---------- 筛选条件表单 ----------
@@ -278,13 +302,14 @@ def main() -> None:
         st.caption(f"衍生指标：{status['metrics_fetched_at'] or '无'}")
         b1, b2 = st.columns(2)
         if b1.button("刷新行情", width="stretch", help="盘中只更新价格/PE/市值"):
-            run_update(db_path, spot_only=True)
-            st.rerun()
+            # 失败时不 rerun，否则页面刷掉、错误信息一闪而过看不到
+            if run_update(db_path, spot_only=True):
+                st.rerun()
         if b2.button(
             "全量更新", width="stretch", help="行情 + 财务 + 股息率/CAGR，需数分钟"
         ):
-            run_update(db_path, spot_only=False)
-            st.rerun()
+            if run_update(db_path, spot_only=False):
+                st.rerun()
 
     spot, fin, metrics = load_frames(
         db_path, status["spot_fetched_at"], config.get("report_date")
@@ -295,7 +320,10 @@ def main() -> None:
         )
         return
 
-    # 可选字段 = 合并后实际存在的列
+    # 可选字段 = 合并后实际存在、且不是整列为空的列
+    # （备用数据源会返回若干全空列，放进下拉框只会让人选出 0 只）
+    empty_cols = {c for c in spot.columns if spot[c].isna().all()}
+    spot = spot.drop(columns=list(empty_cols))
     available = list(spot.columns)
     available += [c for c in fin.columns if c not in available]
     if metrics is not None:
@@ -371,6 +399,15 @@ def main() -> None:
     )
     m2.metric("行情快照", (status["spot_fetched_at"] or "")[:16].replace("T", " "))
     m3.metric("财务报告期", str(fin["report_date"].iloc[0]))
+
+    notice = st.session_state.get("spot_notice")
+    if notice:
+        st.warning(notice)
+    if empty_cols:
+        st.info(
+            "当前行情快照来自备用数据源，缺少这些字段，已从筛选项里隐藏："
+            + "、".join(FIELD_LABELS.get(c, c) for c in sorted(empty_cols))
+        )
 
     days = stale_days(status["spot_fetched_at"])
     if days is not None and days >= STALE_DAYS:

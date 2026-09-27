@@ -223,3 +223,62 @@ def test_ui_command_respects_host_override():
     args = argparse.Namespace(port=8501, host="0.0.0.0", headless=True)
     cmd = ui_command(args)
     assert cmd[cmd.index("--server.address") + 1] == "0.0.0.0"
+
+
+def test_empty_columns_hidden_from_filters(env, monkeypatch):
+    """备用数据源会返回整列为空的字段，不该出现在筛选项里。"""
+    import pandas as pd
+
+    from screener.cache import Cache
+
+    cache = Cache(str(env / "t.db"))
+    spot, _ = cache.load_spot()
+    spot["pct_60d"] = pd.NA  # 模拟备用源返回的全空列
+    cache.save_spot(spot)
+    cache.close()
+
+    at = run_app()
+    assert at.info and "60日涨跌幅" in at.info[0].value
+    # 字段下拉里不应出现它
+    options = at.selectbox(key="field_0").options
+    assert not any("pct_60d" in o for o in options)
+
+
+def test_update_failure_shows_readable_error(env, monkeypatch):
+    """拉取失败时页面给出可读错误，而不是抛栈，且不 rerun 把错误刷掉。"""
+    from screener import fetch
+
+    def boom():
+        raise RuntimeError("接口挂了")
+
+    monkeypatch.setattr(fetch, "fetch_spot", boom)
+
+    at = AppTest.from_file(APP, default_timeout=60)
+    at.run()
+    [b for b in at.button if b.label == "刷新行情"][0].click().run()
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert at.error, "失败时应有 st.error"
+    assert "接口挂了" in at.error[0].value
+    assert "RuntimeError" in at.error[0].value
+
+
+def test_fallback_notice_reaches_the_page(env, monkeypatch):
+    """fetch_spot 切备用源时只 print，界面必须把它显示出来。"""
+    import pandas as pd
+
+    from screener import fetch
+
+    def noisy():
+        print("已切换到备用接口")
+        return pd.DataFrame(
+            {"code": ["600000"], "name": ["浦发银行"], "price": [8.0],
+             "pe_ttm": [5.0], "total_mcap": [2.3e11]}
+        )
+
+    monkeypatch.setattr(fetch, "fetch_spot", noisy)
+
+    at = AppTest.from_file(APP, default_timeout=60)
+    at.run()
+    [b for b in at.button if b.label == "刷新行情"][0].click().run()
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert any("已切换到备用接口" in w.value for w in at.warning)
