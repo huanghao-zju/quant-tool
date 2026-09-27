@@ -26,7 +26,7 @@ if str(ROOT) not in sys.path:
 
 from screener import fetch  # noqa: E402
 from screener.cache import DEFAULT_DB, Cache  # noqa: E402
-from screener.screen import screen_frames  # noqa: E402
+from screener.screen import annualize_factor, screen_frames  # noqa: E402
 
 # 由 `screener ui --db / -c` 通过环境变量传入，便于对不同库/策略各开一个界面
 CONFIG_PATH = Path(os.environ.get("SCREENER_CONFIG") or ROOT / "config.yaml")
@@ -54,7 +54,8 @@ FIELD_LABELS: dict[str, str] = {
     "net_profit": "净利润",
     "net_profit_yoy": "净利同比%",
     "bps": "每股净资产",
-    "roe": "ROE%",
+    "roe": "ROE%（报告期累计）",
+    "roe_annual": "年化ROE%",
     "ocf_per_share": "每股经营现金流",
     "gross_margin": "毛利率%",
     "div_yield": "股息率%",
@@ -134,11 +135,17 @@ def run_update(db_path: str, spot_only: bool) -> bool:
             if notices:
                 st.warning(notices)
             if not spot_only:
-                status.update(label="拉取财务数据…")
+                # 财务 + 衍生指标要分页拉几十次，全程数分钟。期间任何交互或刷新
+                # 都会打断这次脚本运行，已完成的阶段保留、未完成的丢弃。
+                st.caption(
+                    "财务与衍生指标需数分钟，期间请勿刷新页面或操作控件，否则会中断。"
+                    "网络慢时更建议在终端跑 `python -m screener update`。"
+                )
+                status.update(label="拉取财务数据…（数分钟，勿操作）")
                 fin = fetch.fetch_latest_financials()
                 cache.save_financials(fin)
                 st.write(f"财务数据 {len(fin)} 只，报告期 {fin['report_date'].iloc[0]}")
-                status.update(label="拉取股息率 / CAGR（较慢）…")
+                status.update(label="拉取股息率 / CAGR…（最慢的一步，勿操作）")
                 metrics = fetch.fetch_metrics()
                 cache.save_metrics(metrics)
                 st.write(f"衍生指标 {len(metrics)} 只")
@@ -330,6 +337,8 @@ def main() -> None:
         available += [c for c in metrics.columns if c not in available]
     if "pe_ttm" in available and "net_profit_yoy" in available:
         available += ["peg", "pegy"]
+    if "roe" in available and "roe_annual" not in available:
+        available.append("roe_annual")
 
     with st.sidebar:
         st.subheader("筛选条件")
@@ -399,6 +408,22 @@ def main() -> None:
     )
     m2.metric("行情快照", (status["spot_fetched_at"] or "")[:16].replace("T", " "))
     m3.metric("财务报告期", str(fin["report_date"].iloc[0]))
+
+    cached_rd = str(fin["report_date"].iloc[0])
+    newest_rd = fetch.latest_published_report()
+    if cached_rd < newest_rd:
+        st.warning(
+            f"财务数据还停在 {cached_rd}，而 {newest_rd} 的报告已过披露截止日。"
+            "现在的结果是用今天的价格配旧的基本面，请点左侧「全量更新」。"
+        )
+
+    factor = annualize_factor(cached_rd)
+    if factor != 1.0:
+        st.info(
+            f"当前报告期 {cached_rd} 是累计 {int(round(12 / factor))} 个月的数据，"
+            f"「ROE%（报告期累计）」需乘 {factor:g} 才是年化值。"
+            "想按年度口径卡门槛请改用「年化ROE%」字段。"
+        )
 
     notice = st.session_state.get("spot_notice")
     if notice:

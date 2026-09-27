@@ -4,6 +4,12 @@ from __future__ import annotations
 
 import pandas as pd
 
+# 报告期结束月 -> 年化倍数。
+# 东财「业绩报表」的 ROE / 营收 / 净利 都是报告期累计值而非年化值，
+# 所以同一个阈值在一季报和年报上含义完全不同（一季报 ROE>=12 相当于
+# 年化 48%）。这里给出朴素年化倍数，把阈值拉回可比口径。
+ANNUALIZE_FACTOR = {3: 4.0, 6: 2.0, 9: 4.0 / 3.0, 12: 1.0}
+
 OPS = {
     ">": lambda s, v: s > v,
     ">=": lambda s, v: s >= v,
@@ -29,14 +35,28 @@ def merge_frames(
     return df
 
 
+def annualize_factor(report_date: str | None) -> float:
+    """报告期累计值换算成年化值的倍数。无法识别时返回 1.0。"""
+    try:
+        return ANNUALIZE_FACTOR[int(str(report_date)[4:6])]
+    except (ValueError, TypeError, KeyError):
+        return 1.0
+
+
 def add_derived(df: pd.DataFrame) -> pd.DataFrame:
     """派生估值字段，供 config 直接筛选：
 
+    roe_annual = roe × 年化倍数（一季报 ×4、半年报 ×2、三季报 ×4/3、年报 ×1）
+           业绩报表的 roe 是报告期累计值，直接卡阈值会随报告期漂移，
+           想要「ROE 不低于 12%」这种年度口径的条件请用这个字段。
     peg  = pe_ttm / 净利同比增速（单期，波动大，仅作对比）
     pegy = pe_ttm / (增速 + 股息率)  —— 彼得林奇改进式
            增速优先用多年净利 CAGR（cagr_3y），缺失则回退单期同比；
            股息率（div_yield）缺失按 0 计。
     """
+    if "roe" in df.columns and "report_date" in df.columns:
+        rd = df["report_date"].iloc[0] if len(df) else None
+        df["roe_annual"] = pd.to_numeric(df["roe"], errors="coerce") * annualize_factor(rd)
     if "pe_ttm" not in df.columns or "net_profit_yoy" not in df.columns:
         return df
     pe = pd.to_numeric(df["pe_ttm"], errors="coerce")

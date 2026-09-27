@@ -10,11 +10,17 @@
 #   net_profit 净利润 | net_profit_yoy 净利同比% | bps 每股净资产
 #   roe 净资产收益率% | ocf_per_share 每股经营现金流 | gross_margin 毛利率%
 #   industry 所属行业
+# ⚠ eps / revenue / net_profit / ocf_per_share / roe 都是报告期「累计值」，
+#   不是年化值。一季报只累计 3 个月，所以 roe>=12 卡在一季报上相当于要求
+#   年化 48%，全市场只有几十只能过；同一阈值卡在年报上是 12%，有两千多只。
+#   要年度可比的门槛，请用下面的衍生字段 roe_annual。
 # 可用字段（衍生，update 时拉取/计算）:
 #   div_yield 股息率% | cagr_3y 近3年净利复合增速%
 #   peg  = pe_ttm / 净利同比增速（单期，波动大，仅作对比）
 #   pegy = pe_ttm / (增速 + 股息率)  彼得林奇改进式；增速优先取 cagr_3y，
 #          缺失回退单期同比，股息率缺失按 0 计。<0.5 为极佳
+#   roe_annual = roe × 年化倍数（一季报×4 半年报×2 三季报×4/3 年报×1）
+#          口径不随报告期漂移，卡「ROE 不低于 12%」用它
 # 操作符: > >= < <= == != between in contains
 
 report_date: null      # null = 用缓存里最新一期
@@ -27,7 +33,7 @@ filters:
   - {field: pegy, op: ">", value: 0}              # 排除负值（亏损/负增长）
   - {field: cagr_3y, op: between, value: [15, 60]} # 可持续快增，排低基数暴涨
   - {field: revenue_yoy, op: ">=", value: 0}       # 营收正增长，佐证非一次性
-  - {field: roe, op: ">=", value: 12}
+  - {field: roe_annual, op: ">=", value: 12}  # 年化口径，不随报告期漂移
   - {field: total_mcap, op: ">=", value: 5.0e+9}   # 50 亿以上
   # - {field: industry, op: contains, value: "医药"}
 
@@ -43,4 +49,4 @@ top: 50
 
 output_fields:
   [code, name, industry, price, pe_ttm, pb, total_mcap,
-   cagr_3y, div_yield, pegy, roe, revenue_yoy, gross_margin]
+   cagr_3y, div_yield, pegy, roe, roe_annual, revenue_yoy, gross_margin]

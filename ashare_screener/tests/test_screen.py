@@ -143,3 +143,52 @@ def test_cache_roundtrip(tmp_path, spot, financials):
     cache.save_financials(financials)
     assert len(cache.load_financials()) == len(financials)
     cache.close()
+
+
+def test_annualize_factor_by_report_period():
+    from screener.screen import annualize_factor
+
+    assert annualize_factor("20260331") == 4.0      # 一季报累计 3 个月
+    assert annualize_factor("20260630") == 2.0      # 半年报累计 6 个月
+    assert annualize_factor("20260930") == pytest.approx(4 / 3)
+    assert annualize_factor("20251231") == 1.0      # 年报本身就是年化
+    # 认不出来的一律按 1.0，不要把数据放大
+    assert annualize_factor(None) == 1.0
+    assert annualize_factor("garbage") == 1.0
+
+
+def test_roe_annual_makes_threshold_comparable(spot):
+    """同一门槛在不同报告期含义不同，roe_annual 把它拉回年度口径。"""
+    from screener.screen import add_derived
+
+    fin = pd.DataFrame(
+        {
+            "code": ["600000"],
+            "roe": [4.0],  # 单季 4% ≈ 年化 16%
+            "report_date": ["20260331"],
+        }
+    )
+    q1 = add_derived(fin.copy())
+    assert q1["roe_annual"].iloc[0] == pytest.approx(16.0)
+
+    # 同样的 4%，如果是年报就只是 4%
+    annual = add_derived(fin.assign(report_date=["20251231"]))
+    assert annual["roe_annual"].iloc[0] == pytest.approx(4.0)
+
+    # 年化门槛 12：一季报的 4% 过，年报的 4% 不过
+    assert len(apply_filters(q1, [{"field": "roe_annual", "op": ">=", "value": 12}])) == 1
+    assert len(apply_filters(annual, [{"field": "roe_annual", "op": ">=", "value": 12}])) == 0
+
+
+def test_latest_published_report_uses_disclosure_deadlines():
+    from screener.fetch import latest_published_report
+
+    # 半年报截止 8/31：8/30 时最新仍是一季报，9/1 起才是半年报
+    assert latest_published_report(dt.date(2026, 8, 30)) == "20260331"
+    assert latest_published_report(dt.date(2026, 9, 1)) == "20260630"
+    # 三季报截止 10/31
+    assert latest_published_report(dt.date(2026, 10, 30)) == "20260630"
+    assert latest_published_report(dt.date(2026, 11, 1)) == "20260930"
+    # 年报与次年一季报同为 4/30 截止
+    assert latest_published_report(dt.date(2026, 4, 29)) == "20250930"
+    assert latest_published_report(dt.date(2026, 5, 1)) == "20260331"

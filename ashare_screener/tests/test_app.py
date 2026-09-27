@@ -152,8 +152,13 @@ def test_hit_count_is_pre_truncation(env):
 
 
 def test_stale_snapshot_warning(env, monkeypatch):
+    from screener import fetch
+
+    # 固定「最新已披露报告期」，免得财务过期提示混进来
+    monkeypatch.setattr(fetch, "latest_published_report", lambda *a, **k: "20260331")
+
     at = run_app()
-    assert not at.warning  # 刚写入的快照，不该报过期
+    assert not any("天前的数据" in w.value for w in at.warning)  # 刚写入的快照
 
     cache = Cache(str(env / "t.db"))
     old = (dt.datetime.now() - dt.timedelta(days=30)).isoformat(timespec="seconds")
@@ -161,8 +166,7 @@ def test_stale_snapshot_warning(env, monkeypatch):
     cache.close()
 
     at = run_app()
-    assert at.warning
-    assert "30 天前" in at.warning[0].value
+    assert any("30 天前" in w.value for w in at.warning)
 
 
 def test_empty_cache_shows_hint(tmp_path, monkeypatch):
@@ -238,7 +242,7 @@ def test_empty_columns_hidden_from_filters(env, monkeypatch):
     cache.close()
 
     at = run_app()
-    assert at.info and "60日涨跌幅" in at.info[0].value
+    assert any("60日涨跌幅" in i.value for i in at.info)
     # 字段下拉里不应出现它
     options = at.selectbox(key="field_0").options
     assert not any("pct_60d" in o for o in options)
@@ -282,3 +286,39 @@ def test_fallback_notice_reaches_the_page(env, monkeypatch):
     [b for b in at.button if b.label == "刷新行情"][0].click().run()
     assert not at.exception, [str(e.value) for e in at.exception]
     assert any("已切换到备用接口" in w.value for w in at.warning)
+
+
+def test_stale_financials_warning(env, monkeypatch):
+    """财务数据落后一个报告期时要提示，只更新行情不够。"""
+    from screener import fetch
+
+    monkeypatch.setattr(fetch, "latest_published_report", lambda *a, **k: "20260630")
+    at = run_app()  # fixture 里缓存的是 20260331
+    assert any("财务数据还停在 20260331" in w.value for w in at.warning)
+    assert any("20260630" in w.value for w in at.warning)
+
+
+def test_no_stale_financials_warning_when_current(env, monkeypatch):
+    from screener import fetch
+
+    monkeypatch.setattr(fetch, "latest_published_report", lambda *a, **k: "20260331")
+    at = run_app()
+    assert not any("财务数据还停在" in w.value for w in at.warning)
+
+
+def test_period_cumulative_notice_and_annual_roe_field(env, monkeypatch):
+    """一季报要提示 roe 是 3 个月累计，且年化字段可选可筛。"""
+    from screener import fetch
+
+    monkeypatch.setattr(fetch, "latest_published_report", lambda *a, **k: "20260331")
+    at = run_app()
+    assert any("累计 3 个月" in i.value for i in at.info)
+
+    options = at.selectbox(key="field_0").options
+    assert any("roe_annual" in o for o in options)
+
+    # 用年化字段筛：fixture 里 roe 11/22/32 一季报 ×4 => 44/88/128
+    at.selectbox(key="field_0").set_value("roe_annual").run()
+    at.number_input(key="val_0_num").set_value(100.0).run()
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert hit_count(at) == 1  # 只有 roe=32 的茅台年化 128 过线
