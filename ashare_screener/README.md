@@ -63,6 +63,20 @@ cd ashare_screener && python -m pytest tests/ -v
 
 测试用合成数据覆盖筛选/缓存逻辑与浏览器界面（Streamlit AppTest 无头跑），不依赖网络。
 
+### 常驻后台运行（macOS）
+
+用 launchd 用户级 agent 常驻，登录即起、崩溃自动重启，只监听本机：
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.huanghao.ashare-screener-ui.plist
+launchctl print gui/$(id -u)/com.huanghao.ashare-screener-ui   # 查看状态
+launchctl kickstart -k gui/$(id -u)/com.huanghao.ashare-screener-ui  # 改完代码重启
+launchctl bootout gui/$(id -u)/com.huanghao.ashare-screener-ui  # 停止（删 plist 则永久移除）
+```
+
+日志在 `~/Library/Logs/ashare-screener-ui.log`。
+`nohup` 起的进程会随终端会话被回收，做不到常驻，所以用 launchd。
+
 ## 报告期口径（容易踩的坑）
 
 东财「业绩报表」里的 `eps` `revenue` `net_profit` `ocf_per_share` `roe`
