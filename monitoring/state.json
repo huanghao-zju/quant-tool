@@ -1,9 +1,9 @@
 {
- "stage": 1,
- "entered": "2026-10-05",
- "quiet_days": 9,
+ "stage": 0,
+ "entered": "2026-10-19",
+ "quiet_days": 0,
  "snapshot": [
   "30Y JGB 创新高（4.148%）且 10Y>2.3%（3.097%）"
  ],
- "last_eval_date": "2026-10-17"
+ "last_eval_date": "2026-10-19"
 }
