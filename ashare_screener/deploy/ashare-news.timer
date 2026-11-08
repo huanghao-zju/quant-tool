@@ -1,0 +1,13 @@
+[Unit]
+Description=Check every 20min whether a Bloomberg digest is due
+
+[Timer]
+# 每 20 分钟唤醒一次。该不该真推、推早报还是晚报，由 python 侧的窗口判断决定：
+# 早 08:30-11:00 / 晚 20:30-23:00，窗口内且当日该时段未成功推送才执行。
+# 这样彭博临时 403、机器重启、整点错过都能在窗口内自动补上，已推过则直接退出。
+OnCalendar=*:0/20
+# 机器重启后补跑一次，避免重启正好落在窗口里却整天没推
+Persistent=true
+
+[Install]
+WantedBy=timers.target

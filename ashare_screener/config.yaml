@@ -10,16 +10,40 @@
 #   net_profit 净利润 | net_profit_yoy 净利同比% | bps 每股净资产
 #   roe 净资产收益率% | ocf_per_share 每股经营现金流 | gross_margin 毛利率%
 #   industry 所属行业
+#   revenue_stable 营收连续正增长(1/0) | profit_stable 净利连续正增长(1/0)
+#          需 stability_periods >= 2，基于最近几期的同比增速判定。
+#          周期股常是一期暴增、下一期转负，用它挡掉这种单期噪声。
+# ⚠ eps / revenue / net_profit / ocf_per_share / roe 都是报告期「累计值」，
+#   不是年化值。一季报只累计 3 个月，所以 roe>=12 卡在一季报上相当于要求
+#   年化 48%，全市场只有几十只能过；同一阈值卡在年报上是 12%，有两千多只。
+#   要年度可比的门槛，请用下面的衍生字段 roe_annual。
 # 可用字段（衍生，update 时拉取/计算）:
 #   div_yield 股息率% | cagr_3y 近3年净利复合增速%
+#   has_dividend 有分红记为 1、无分红记为 0
+#          div_yield 缺失实际是「查不到分红方案」，多数是公司从未分红。
+#          用它区分「不分红」和「股息率低」——后者才该算进 pegy 分母。
 #   peg  = pe_ttm / 净利同比增速（单期，波动大，仅作对比）
 #   pegy = pe_ttm / (增速 + 股息率)  彼得林奇改进式；增速优先取 cagr_3y，
 #          缺失回退单期同比，股息率缺失按 0 计。<0.5 为极佳
+#          ⚠ 分母 ≤0（增速为负）或 pe_ttm ≤0（公司亏损）时 pegy 置空。
+#            否则「负 PE ÷ 负增速」会算出漂亮的小正数，把亏损股伪装成
+#            低估标的 —— 实测修复前有 441 只这样蒙混过关。
+#   roe_annual = roe × 年化倍数（一季报×4 半年报×2 三季报×4/3 年报×1）
+#          口径不随报告期漂移，卡「ROE 不低于 12%」用它
 # 操作符: > >= < <= == != between in contains
 
 report_date: null      # null = 用缓存里最新一期
 exclude_st: true       # 剔除 ST / 退市风险股
 exclude_bse: false     # true 则剔除北交所
+max_per_industry: 3    # 每行业最多保留几只（在排序之后生效，留该行业最优的）。
+                      # 不写或填 0 = 不限流。周期性行业容易扎堆导致分散失效，
+                      # 实测不限流时 50 只里有 17 只集中在有色/银行/证券，
+                      # 设 3 之后行业数从 26 增到 30、前三行业占比从 34% 降到 18%。
+stability_periods: 2  # 用最近几期财报算「连续正增长」标记（1 = 不算）。
+                      # 产出 revenue_stable / profit_stable 两个 0/1 字段：
+                      # 所有对比期的同比增速都 > 0 才算 1，用于挡掉单期暴增的周期股。
+                      # ⚠ 只基于 yoy 增速，不碰累计绝对值 —— 一季报营收只累计 3 个月、
+                      #   半年报累计 6 个月，跨期比大小是口径差异不是增长。
 
 # 示例：彼得林奇改进 PEGY < 0.5 极佳标的（用 3 年净利 CAGR + 股息率）
 filters:
@@ -27,8 +51,9 @@ filters:
   - {field: pegy, op: ">", value: 0}              # 排除负值（亏损/负增长）
   - {field: cagr_3y, op: between, value: [15, 60]} # 可持续快增，排低基数暴涨
   - {field: revenue_yoy, op: ">=", value: 0}       # 营收正增长，佐证非一次性
-  - {field: roe, op: ">=", value: 12}
+  - {field: roe_annual, op: ">=", value: 12}  # 年化口径，不随报告期漂移
   - {field: total_mcap, op: ">=", value: 5.0e+9}   # 50 亿以上
+  # - {field: has_dividend, op: "==", value: 1}    # 只要有分红的公司
   # - {field: industry, op: contains, value: "医药"}
 
 # 另一种经典示例：低估值 + 高 ROE + 营收正增长
@@ -43,4 +68,39 @@ top: 50
 
 output_fields:
   [code, name, industry, price, pe_ttm, pb, total_mcap,
-   cagr_3y, div_yield, pegy, roe, revenue_yoy, gross_margin]
+   cagr_3y, div_yield, pegy, roe, roe_annual, revenue_yoy, gross_margin]
+
+# ============================================================================
+# 彭博社新闻简报（python -m screener.news）
+# ============================================================================
+news:
+  feishu:
+    # 飞书群 → 设置 → 群机器人 → 添加「自定义机器人」→ 复制 Webhook 地址
+    # 形如 https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx-xxxx-xxxx
+    webhook: ""
+    # 机器人安全设置里勾了「签名校验」才需要填，否则留空
+    secret: ""
+
+  # 出口代理。null = 跟随系统路由（VPN 用 TUN/增强模式时天然生效，本机推荐）
+  # 若 VPN 是「系统代理」模式而脚本读不到，填 http://127.0.0.1:7890
+  # 部署在境外 VPS 上时保持 null —— 那边本来就直连彭博，不需要代理
+  proxy: null
+
+  # 推送窗口、推送日期用的时区。**部署到 VPS 必须保持 Asia/Shanghai**：
+  # VPS 普遍是 UTC，「08:30 早报」到那边是 00:30，不配的话永远不触发且不报错
+  timezone: Asia/Shanghai
+
+  # 每次推送的总条数分配。中国市场优先，宁可少推也不拿头条凑数
+  china_slots: 6
+  headline_slots: 4
+
+  # 只看最近多少小时内的新闻。早晚两次各 30 小时，能覆盖隔夜与周末
+  max_age_hours: 30
+
+  # 推送窗口。launchd 每 20 分钟唤醒一次，窗口内且当日该时段未成功推送才执行，
+  # 所以 VPN 晚开也能补推。窗口不支持跨零点。
+  windows:
+    morning: ["08:30", "11:00"]
+    evening: ["20:30", "23:00"]
+
+  db: data/news.db

@@ -1,4 +1,8 @@
 data/
 __pycache__/
 .pytest_cache/
+.pytest-tmp/
 *.csv
+
+# WorkBuddy 本地记忆目录（含机器信息，不入库）
+.workbuddy/

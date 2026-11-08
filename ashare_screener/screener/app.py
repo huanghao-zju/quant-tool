@@ -1,0 +1,512 @@
+"""Streamlit 浏览器界面。
+
+    python -m screener ui            # 等价于 streamlit run screener/app.py
+
+左侧调条件，右侧实时出结果。筛选逻辑完全复用 screen.screen_frames，
+这里只负责把 config.yaml 的结构映射成表单控件，不重复实现任何筛选规则。
+"""
+
+from __future__ import annotations
+
+import contextlib
+import datetime as dt
+import io
+import os
+import sys
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+import yaml
+
+# 直接 `streamlit run screener/app.py` 时包不在 sys.path 里，补一下
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from screener import fetch  # noqa: E402
+from screener.cache import DEFAULT_DB, Cache  # noqa: E402
+from screener.screen import annualize_factor, screen_frames  # noqa: E402
+
+# 由 `screener ui --db / -c` 通过环境变量传入，便于对不同库/策略各开一个界面
+CONFIG_PATH = Path(os.environ.get("SCREENER_CONFIG") or ROOT / "config.yaml")
+DB_PATH = str(os.environ.get("SCREENER_DB") or DEFAULT_DB)
+
+# 字段 -> 中文名。字典顺序即下拉框顺序。
+FIELD_LABELS: dict[str, str] = {
+    "code": "代码",
+    "name": "名称",
+    "industry": "所属行业",
+    "price": "最新价",
+    "pct_change": "涨跌幅%",
+    "pct_60d": "60日涨跌幅%",
+    "pct_ytd": "年初至今%",
+    "amount": "成交额",
+    "turnover_rate": "换手率%",
+    "volume_ratio": "量比",
+    "pe_ttm": "动态PE",
+    "pb": "PB",
+    "total_mcap": "总市值",
+    "float_mcap": "流通市值",
+    "eps": "每股收益",
+    "revenue": "营业总收入",
+    "revenue_yoy": "营收同比%",
+    "revenue_stable": "营收连续正增长(1/0)",
+    "profit_stable": "净利连续正增长(1/0)",
+    "net_profit": "净利润",
+    "net_profit_yoy": "净利同比%",
+    "bps": "每股净资产",
+    "roe": "ROE%（报告期累计）",
+    "roe_annual": "年化ROE%",
+    "ocf_per_share": "每股经营现金流",
+    "gross_margin": "毛利率%",
+    "div_yield": "股息率%",
+    "has_dividend": "有分红(1/0)",
+    "cagr_3y": "3年净利CAGR%",
+    "peg": "PEG",
+    "pegy": "PEGY",
+}
+TEXT_FIELDS = {"code", "name", "industry"}
+# 以「元」为单位的大数：输入框和表格都换算成「亿」显示，配置里仍存元
+YI_FIELDS = {"total_mcap", "float_mcap", "revenue", "net_profit", "amount"}
+NUMERIC_OPS = [">", ">=", "<", "<=", "==", "!=", "between"]
+TEXT_OPS = ["contains", "==", "!=", "in"]
+
+
+# 行情快照超过这个天数就提示重新拉取
+STALE_DAYS = 3
+
+
+def label(field: str) -> str:
+    return f"{FIELD_LABELS.get(field, field)} ({field})"
+
+
+def stale_days(fetched_at: str | None) -> int | None:
+    """行情快照距今天数，解析失败返回 None。"""
+    if not fetched_at:
+        return None
+    try:
+        return (dt.datetime.now() - dt.datetime.fromisoformat(fetched_at)).days
+    except ValueError:
+        return None
+
+
+# ---------- 数据加载 ----------
+
+
+def cache_status(db_path: str) -> dict:
+    cache = Cache(db_path)
+    try:
+        return cache.status()
+    finally:
+        cache.close()
+
+
+@st.cache_data(show_spinner="读取缓存…")
+def load_frames(
+    db_path: str,
+    fetched_at: str | None,
+    report_date: str | None,
+    stability_periods: int = 2,
+):
+    """参数带上时间戳，只是为了让 update 之后缓存自动失效。"""
+    cache = Cache(db_path)
+    try:
+        spot, _ = cache.load_spot()
+        fin = cache.load_financials(report_date)
+        metrics = cache.load_metrics()
+        history = None
+        if stability_periods > 1:
+            history = cache.load_financials_history(
+                ["revenue_yoy", "net_profit_yoy"], periods=stability_periods
+            )
+    finally:
+        cache.close()
+    return spot, fin, metrics, history
+
+
+def _fetch_spot_with_notices() -> tuple[pd.DataFrame, str]:
+    """fetch_spot 在切换备用数据源时只 print 提示，终端能看见、浏览器看不见。
+    这里把它的输出接过来，交给调用方显示在页面上。"""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        spot = fetch.fetch_spot()
+    return spot, buf.getvalue().strip()
+
+
+def run_update(db_path: str, spot_only: bool) -> bool:
+    """返回是否成功。失败时在页面上给出可读的错误，而不是抛栈。"""
+    cache = Cache(db_path)
+    try:
+        with st.status("拉取行情快照…", expanded=True) as status:
+            spot, notices = _fetch_spot_with_notices()
+            cache.save_spot(spot)
+            st.write(f"行情快照 {len(spot)} 只")
+            # 成功后会 st.rerun()，此刻渲染的东西会被刷掉；
+            # 数据源提示存进 session_state，由 main() 在重跑后显示。
+            st.session_state.spot_notice = notices or None
+            if notices:
+                st.warning(notices)
+            if not spot_only:
+                # 财务 + 衍生指标要分页拉几十次，全程数分钟。期间任何交互或刷新
+                # 都会打断这次脚本运行，已完成的阶段保留、未完成的丢弃。
+                st.caption(
+                    "财务与衍生指标需数分钟，期间请勿刷新页面或操作控件，否则会中断。"
+                    "网络慢时更建议在终端跑 `python -m screener update`。"
+                )
+                status.update(label="拉取财务数据…（数分钟，勿操作）")
+                fin = fetch.fetch_latest_financials()
+                cache.save_financials(fin)
+                st.write(f"财务数据 {len(fin)} 只，报告期 {fin['report_date'].iloc[0]}")
+                status.update(label="拉取股息率 / CAGR…（最慢的一步，勿操作）")
+                metrics = fetch.fetch_metrics()
+                cache.save_metrics(metrics)
+                st.write(f"衍生指标 {len(metrics)} 只")
+            status.update(label="更新完成", state="complete")
+    except Exception as e:
+        st.error(
+            f"更新失败：{type(e).__name__}: {e}\n\n"
+            "东方财富接口不稳定或本机网络不通时会这样，稍后重试即可；"
+            "持续失败请在终端跑 `python -m screener update --spot-only` 看完整报错。"
+        )
+        return False
+    finally:
+        cache.close()
+    load_frames.clear()
+    return True
+
+
+# ---------- 筛选条件表单 ----------
+
+
+def default_config() -> dict:
+    if CONFIG_PATH.exists():
+        return yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    return {}
+
+
+def init_state(config: dict) -> None:
+    if "filters" in st.session_state:
+        return
+    st.session_state.filters = []
+    for i, f in enumerate(config.get("filters", [])):
+        st.session_state.filters.append({**f, "_id": i})
+    st.session_state.next_id = len(st.session_state.filters)
+
+
+def add_filter() -> None:
+    st.session_state.filters.append(
+        {"_id": st.session_state.next_id, "field": "roe", "op": ">=", "value": 10}
+    )
+    st.session_state.next_id += 1
+
+
+def remove_filter(fid: int) -> None:
+    st.session_state.filters = [f for f in st.session_state.filters if f["_id"] != fid]
+
+
+def _num_input(container, text: str, value: float, key: str, field: str) -> float:
+    """大额字段以「亿」为单位收值，返回仍是元。"""
+    if field in YI_FIELDS:
+        v = container.number_input(
+            f"{text}（亿）", value=float(value) / 1e8, key=key, step=1.0,
+            label_visibility="collapsed",
+        )
+        return v * 1e8
+    return container.number_input(
+        text, value=float(value), key=key, step=1.0, label_visibility="collapsed"
+    )
+
+
+def render_filter_row(f: dict, available: list[str]) -> None:
+    """侧栏窄，一个条件占两行：上行字段+删除，下行操作符+值。"""
+    fid = f["_id"]
+    fields = [x for x in FIELD_LABELS if x in available]
+    if f.get("field") not in fields:
+        f["field"] = fields[0]
+
+    top, btn = st.columns([5, 1])
+    f["field"] = top.selectbox(
+        "字段", fields, index=fields.index(f["field"]), key=f"field_{fid}",
+        format_func=label, label_visibility="collapsed",
+    )
+    btn.button("✕", key=f"del_{fid}", on_click=remove_filter, args=(fid,), help="删除此条件")
+
+    is_text = f["field"] in TEXT_FIELDS
+    ops = TEXT_OPS if is_text else NUMERIC_OPS
+    if f.get("op") not in ops:
+        f["op"] = ops[0]
+        f["value"] = "" if is_text else 0.0
+    c_op, c_val = st.columns([2, 3])
+    f["op"] = c_op.selectbox(
+        "操作符", ops, index=ops.index(f["op"]), key=f"op_{fid}",
+        label_visibility="collapsed",
+    )
+
+    # key 里带上控件类型：字段在数值/文本之间切换时不会复用不兼容的旧值
+    if is_text:
+        raw = f.get("value")
+        if f["op"] == "in":
+            text = c_val.text_input(
+                "值", value=",".join(raw) if isinstance(raw, list) else str(raw or ""),
+                key=f"val_{fid}_list", placeholder="逗号分隔", label_visibility="collapsed",
+            )
+            f["value"] = [s.strip() for s in text.split(",") if s.strip()]
+        else:
+            f["value"] = c_val.text_input(
+                "值", value="" if isinstance(raw, list) else str(raw or ""),
+                key=f"val_{fid}_text", label_visibility="collapsed",
+            )
+    elif f["op"] == "between":
+        raw = f.get("value")
+        v = raw if isinstance(raw, list) and len(raw) == 2 else [0.0, 0.0]
+        lo, hi = c_val.columns(2)
+        a = _num_input(lo, "下限", v[0], f"lo_{fid}", f["field"])
+        b = _num_input(hi, "上限", v[1], f"hi_{fid}", f["field"])
+        f["value"] = [a, b]
+    else:
+        raw = f.get("value")
+        v = 0.0 if isinstance(raw, (list, str)) else (raw or 0.0)
+        f["value"] = _num_input(c_val, "值", v, f"val_{fid}_num", f["field"])
+
+
+def config_to_yaml(config: dict) -> str:
+    """去掉内部字段，输出可直接粘回 config.yaml 的文本。"""
+    clean = dict(config)
+    clean["filters"] = [
+        {k: v for k, v in f.items() if not k.startswith("_")} for f in config["filters"]
+    ]
+    return yaml.safe_dump(
+        clean, allow_unicode=True, sort_keys=False, default_flow_style=None
+    )
+
+
+# ---------- 结果展示 ----------
+
+
+def display_frame(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """元 -> 亿，并生成列名与数字格式配置。"""
+    out = df.copy()
+    col_cfg: dict = {}
+    for c in out.columns:
+        name = FIELD_LABELS.get(c, c)
+        if c in YI_FIELDS:
+            out[c] = pd.to_numeric(out[c], errors="coerce") / 1e8
+            col_cfg[c] = st.column_config.NumberColumn(f"{name}(亿)", format="%.2f")
+        elif c in TEXT_FIELDS:
+            col_cfg[c] = st.column_config.TextColumn(name)
+        else:
+            col_cfg[c] = st.column_config.NumberColumn(name, format="%.2f")
+    return out, col_cfg
+
+
+# ---------- 页面 ----------
+
+
+def main() -> None:
+    st.set_page_config(page_title="A 股筛选器", page_icon="📈", layout="wide")
+    st.title("A 股量化筛选器")
+
+    db_path = DB_PATH
+    config = default_config()
+    init_state(config)
+    status = cache_status(db_path)
+
+    with st.sidebar:
+        st.subheader("数据")
+        st.caption(f"行情快照：{status['spot_fetched_at'] or '无'}")
+        st.caption(
+            f"财务报告期：{status['financials_report_date'] or '无'}"
+            f"（拉取于 {status['financials_fetched_at'] or '无'}）"
+        )
+        st.caption(f"衍生指标：{status['metrics_fetched_at'] or '无'}")
+        b1, b2 = st.columns(2)
+        if b1.button("刷新行情", width="stretch", help="盘中只更新价格/PE/市值"):
+            # 失败时不 rerun，否则页面刷掉、错误信息一闪而过看不到
+            if run_update(db_path, spot_only=True):
+                st.rerun()
+        if b2.button(
+            "全量更新", width="stretch", help="行情 + 财务 + 股息率/CAGR，需数分钟"
+        ):
+            if run_update(db_path, spot_only=False):
+                st.rerun()
+
+    spot, fin, metrics, history = load_frames(
+        db_path,
+        status["spot_fetched_at"],
+        config.get("report_date"),
+        int(config.get("stability_periods", 2) or 1),
+    )
+    if spot is None or fin is None or fin.empty:
+        st.warning(
+            "缓存为空，请先点左侧「全量更新」，或在终端执行 `python -m screener update`。"
+        )
+        return
+
+    # 可选字段 = 合并后实际存在、且不是整列为空的列
+    # （备用数据源会返回若干全空列，放进下拉框只会让人选出 0 只）
+    empty_cols = {c for c in spot.columns if spot[c].isna().all()}
+    spot = spot.drop(columns=list(empty_cols))
+    available = list(spot.columns)
+    available += [c for c in fin.columns if c not in available]
+    if metrics is not None:
+        available += [c for c in metrics.columns if c not in available]
+    if "pe_ttm" in available and "net_profit_yoy" in available:
+        available += ["peg", "pegy"]
+    if "roe" in available and "roe_annual" not in available:
+        available.append("roe_annual")
+    if "div_yield" in available and "has_dividend" not in available:
+        available.append("has_dividend")
+    if history is not None and not history.empty:
+        available += [
+            c for c in ("revenue_stable", "profit_stable") if c not in available
+        ]
+
+    with st.sidebar:
+        st.subheader("筛选条件")
+        exclude_st = st.checkbox(
+            "剔除 ST / 退市风险", value=config.get("exclude_st", True), key="exclude_st"
+        )
+        exclude_bse = st.checkbox(
+            "剔除北交所", value=config.get("exclude_bse", False), key="exclude_bse"
+        )
+        for f in st.session_state.filters:
+            render_filter_row(f, available)
+            st.divider()
+        st.button("＋ 添加条件", on_click=add_filter, width="stretch")
+
+        st.subheader("排序与输出")
+        sortable = [x for x in FIELD_LABELS if x in available and x not in TEXT_FIELDS]
+        cfg_sort = config.get("sort_by")
+        default_sort = cfg_sort if cfg_sort in sortable else (sortable[0] if sortable else None)
+        sort_by = (
+            st.selectbox(
+                "排序字段", sortable, index=sortable.index(default_sort),
+                format_func=label, key="sort_by",
+            )
+            if sortable
+            else None
+        )
+        ascending = st.toggle("升序", value=config.get("ascending", False), key="ascending")
+        max_per_industry = st.number_input(
+            "每行业最多", min_value=0, max_value=500,
+            value=int(config.get("max_per_industry") or 0), key="max_per_industry",
+            help="每个行业最多保留几只（按排序先后取）。0 = 不限流。"
+                 "周期性行业容易扎堆导致分散失效，可设 3~5。",
+        )
+        top = st.number_input(
+            "最多显示", min_value=1, max_value=5000,
+            value=int(config.get("top") or 50), key="top",
+        )
+        field_choices = [x for x in FIELD_LABELS if x in available]
+        default_out = [c for c in config.get("output_fields") or [] if c in field_choices] or [
+            c
+            for c in ["code", "name", "industry", "price", "pe_ttm", "pb", "total_mcap", "roe"]
+            if c in field_choices
+        ]
+        output_fields = st.multiselect(
+            "输出列", field_choices, default=default_out, format_func=label, key="output_fields"
+        )
+
+    live_config = {
+        "report_date": config.get("report_date"),
+        "exclude_st": exclude_st,
+        "exclude_bse": exclude_bse,
+        "filters": st.session_state.filters,
+        "sort_by": sort_by,
+        "ascending": ascending,
+        "max_per_industry": int(max_per_industry) or None,
+        "top": None,  # 先取全量以便显示真实命中数，截断在下面做
+        "output_fields": output_fields,
+    }
+
+    try:
+        result = screen_frames(spot, fin, live_config, metrics, history)
+    except (KeyError, TypeError, ValueError) as e:
+        st.error(f"筛选条件有误：{e}")
+        return
+
+    # 先不限流跑一次拿到「满足条件」的真实总数，再跑限流后的结果。
+    # 否则侧栏的限流值会把命中数悄悄压低，看不出来有多少只被行业上限挡掉了。
+    cap = int(max_per_industry) or None
+    uncapped_n = None
+    if cap:
+        try:
+            uncapped = screen_frames(
+                spot, fin, {**live_config, "max_per_industry": None}, metrics, history
+            )
+            uncapped_n = len(uncapped)
+        except (KeyError, TypeError, ValueError):
+            pass  # 已在上面 catch 过，这里只是拿参考值，失败不影响主结果
+
+    matched = len(result)
+    result = result.head(int(top))
+
+    m1, m2, m3 = st.columns(3)
+    if uncapped_n is not None and uncapped_n > matched:
+        m1.metric(
+            "命中", f"{matched} 只",
+            delta=f"条件命中 {uncapped_n} 只，行业限流后剩 {matched} 只",
+            delta_color="off",
+        )
+    else:
+        m1.metric(
+            "命中", f"{matched} 只",
+            delta=f"显示前 {len(result)} 只" if matched > len(result) else None,
+            delta_color="off",
+        )
+    m2.metric("行情快照", (status["spot_fetched_at"] or "")[:16].replace("T", " "))
+    m3.metric("财务报告期", str(fin["report_date"].iloc[0]))
+
+    cached_rd = str(fin["report_date"].iloc[0])
+    newest_rd = fetch.latest_published_report()
+    if cached_rd < newest_rd:
+        st.warning(
+            f"财务数据还停在 {cached_rd}，而 {newest_rd} 的报告已过披露截止日。"
+            "现在的结果是用今天的价格配旧的基本面，请点左侧「全量更新」。"
+        )
+
+    factor = annualize_factor(cached_rd)
+    if factor != 1.0:
+        st.info(
+            f"当前报告期 {cached_rd} 是累计 {int(round(12 / factor))} 个月的数据，"
+            f"「ROE%（报告期累计）」需乘 {factor:g} 才是年化值。"
+            "想按年度口径卡门槛请改用「年化ROE%」字段。"
+        )
+
+    notice = st.session_state.get("spot_notice")
+    if notice:
+        st.warning(notice)
+    if empty_cols:
+        st.info(
+            "当前行情快照来自备用数据源，缺少这些字段，已从筛选项里隐藏："
+            + "、".join(FIELD_LABELS.get(c, c) for c in sorted(empty_cols))
+        )
+
+    days = stale_days(status["spot_fetched_at"])
+    if days is not None and days >= STALE_DAYS:
+        st.warning(
+            f"行情快照已是 {days} 天前的数据，价格 / PE / 市值均已过时，"
+            "请点左侧「刷新行情」。"
+        )
+
+    shown, col_cfg = display_frame(result)
+    st.dataframe(
+        shown, column_config=col_cfg, width="stretch", hide_index=True, height=600
+    )
+
+    buf = io.StringIO()
+    result.to_csv(buf, index=False)
+    d1, d2 = st.columns([1, 3])
+    d1.download_button(
+        "下载 CSV",
+        buf.getvalue().encode("utf-8-sig"),
+        "screen_result.csv",
+        "text/csv",
+        width="stretch",
+    )
+    with d2.expander("当前条件对应的 config.yaml"):
+        st.code(config_to_yaml({**live_config, "top": int(top)}), language="yaml")
+
+
+main()

@@ -1,0 +1,14 @@
+[Unit]
+Description=Bloomberg China news digest -> Feishu
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__ROOT__
+ExecStart=__ROOT__/.venv/bin/python -m screener.news
+# 单次执行上限，防止卡死的连接把下一轮堵住
+TimeoutStartSec=300
+# 退出码 1 表示抓取/推送失败（比如彭博临时 403）。
+# 这是可重试的正常情况，不要让 systemd 记成 failed 并在日志里刷红。
+SuccessExitStatus=0 1

@@ -95,6 +95,31 @@ def report_dates(today: dt.date | None = None, n: int = 8) -> list[str]:
     return dates
 
 
+# 报告期结束 (月, 日) -> 法定披露截止 (相对年份偏移, 月, 日)
+# 一季报 4/30、半年报 8/31、三季报 10/31、年报次年 4/30
+DISCLOSURE_DEADLINE = {
+    (3, 31): (0, 4, 30),
+    (6, 30): (0, 8, 31),
+    (9, 30): (0, 10, 31),
+    (12, 31): (1, 4, 30),
+}
+
+
+def latest_published_report(today: dt.date | None = None) -> str:
+    """最近一个已过法定披露截止日的报告期，格式 YYYYMMDD。
+
+    用来判断缓存里的财务数据是不是落后了整整一个报告期。
+    """
+    today = today or dt.date.today()
+    best = None
+    for date in report_dates(today, n=8):
+        year, month, day = int(date[:4]), int(date[4:6]), int(date[6:])
+        offset, dm, dd = DISCLOSURE_DEADLINE[(month, day)]
+        if dt.date(year + offset, dm, dd) <= today:
+            best = date if best is None else max(best, date)
+    return best or report_dates(today, n=8)[-1]
+
+
 def _rename(df: pd.DataFrame, mapping: dict[str, str]) -> pd.DataFrame:
     missing = [c for c in mapping if c not in df.columns]
     if missing:

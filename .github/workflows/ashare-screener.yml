@@ -1,0 +1,124 @@
+name: ashare-screener
+
+# A 股基本面筛选日报（彼得林奇改进 PEGY < 0.5）
+#
+# 为什么放在云端：macOS 上 launchd 的 bootstrap 在受限 shell 里必报
+# "Input/output error"，每日更新任务从来没注册成功过，快照已陈旧数周。
+# GitHub Actions 自带调度、不依赖本机开机，是这个场景的正解。
+#
+# 时区：GitHub cron 用 UTC。A 股 16:00 收盘，北京时间 = UTC+8，
+# 所以 07:20 UTC 对应北京时间 15:20（收盘后 20 分钟，让东财数据落定）。
+# 周一到周五跑。
+on:
+  schedule:
+    - cron: "20 7 * * 1-5"     # UTC 07:20 = 北京时间 15:20
+  workflow_dispatch:
+    inputs:
+      push_feishu:
+        description: "是否推送飞书"
+        type: boolean
+        default: false
+      no_build:
+        description: "跳过拉数据（只跑筛选，用于调试）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# 同一时间只跑一个，避免两次 update 抢同一个 SQLite 文件
+concurrency:
+  group: ashare-screener
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: ashare_screener
+
+jobs:
+  screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # 3.11 而不是 runner 默认的 3.14：pandas 3.x 与 akshare 1.18/1.20
+          # 仍有兼容问题，3.11 + pandas 2.x 是验证过的组合。
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: ashare_screener/requirements-ci.txt
+
+      - name: Install dependencies
+        run: |
+          pip install --quiet --upgrade pip
+          pip install --quiet -r requirements-ci.txt
+
+      - name: Update data and build report
+        env:
+          PUSH_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+        run: |
+          set -o pipefail
+          if [ "${{ inputs.no_build }}" = "true" ]; then
+            echo "跳过拉数据（--skip-build）"
+            python3 scripts/cloud_daily.py --skip-build --no-push
+          else
+            python3 scripts/cloud_daily.py \
+              --out-csv out_daily.csv \
+              --out-md "reports/daily_$(date -u +%F).md" \
+              --history-csv data/screen_history.csv \
+              --no-push
+          fi
+          echo "=== 校验 ==="
+          python3 - <<'PY'
+          import pandas as pd
+          df = pd.read_csv("out_daily.csv", encoding="utf-8-sig", dtype={"code": str})
+          df["code"] = df["code"].str.zfill(6)
+          assert len(df) == 50, f"导出行数异常: {len(df)}"
+          assert df["pegy"].is_monotonic_increasing, "pegy 未升序"
+          assert ((df["pegy"] > 0) & (df["pegy"] < 0.5)).all(), "存在越界 pegy"
+          print("CSV_OK", len(df), "行")
+          PY
+
+      - name: Push to Feishu
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.push_feishu == true
+        env:
+          PUSH_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+        run: |
+          python3 scripts/push_report.py --md "reports/daily_$(date -u +%F).md"
+
+      - name: Persist results
+        run: |
+          git config user.name "screener-bot"
+          git config user.email "bot@users.noreply.github.com"
+          # data/ 在 .gitignore 里，但留痕 CSV 必须提交，否则下一轮 CI 拿不到历史
+          git add -f out_daily.csv "reports/" data/screen_history.csv data/screen_history.items.csv || true
+          git diff --cached --quiet || git commit -m "chore(screener): daily result $(date -u +%F)"
+          git push || echo "推送失败（可能是并发冲突，下次会带上）"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### A 股筛选日报 $(date -u +%F)"
+            echo ""
+            if [ -s out_daily.csv ]; then
+              echo '```'
+              head -6 out_daily.csv
+              echo '```'
+            else
+              echo "❌ 未生成 CSV"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 任务失败告警：抓「跑了但报错」。「根本没被触发」由次日 absence 兜底。
+      - name: Notify on failure
+        if: failure()
+        env:
+          PUSH_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+        run: |
+          curl -s -X POST "$PUSH_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d '{"msg_type":"text","content":{"text":"[筛选任务失败] ⚠️ ashare-screener 运行失败，查看日志：'"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"'"}}' \
+            || echo "告警推送失败"

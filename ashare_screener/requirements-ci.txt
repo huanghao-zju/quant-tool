@@ -1,0 +1,5 @@
+# CI 用依赖：与 requirements.txt 相同，但不含 streamlit。
+# 云端日报只需要拉数 + 筛选 + 出报告，界面跑在本机，CI 装 streamlit 是浪费。
+akshare>=1.14
+pandas>=2.0,<3.0
+PyYAML>=6.0

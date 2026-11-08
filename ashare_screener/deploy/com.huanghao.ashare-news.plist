@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.huanghao.ashare-news</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/huanghao/project/quant-tool/ashare_screener/scripts/news_push.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/huanghao/project/quant-tool/ashare_screener</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PYTHONPATH</key>
+        <string>/Users/huanghao/project/quant-tool/ashare_screener</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <!-- 每 20 分钟唤醒一次。真正的推送窗口（8:30-11:00 / 20:30-23:00）由
+         python 侧判断，这样 VPN 晚连上也能在窗口内补推，已经推过则直接退出。
+         不用 StartCalendarInterval：那样只能定点触发，错过就没了。 -->
+    <key>StartInterval</key>
+    <integer>1200</integer>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/huanghao/Library/Logs/ashare-news.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/huanghao/Library/Logs/ashare-news.log</string>
+</dict>
+</plist>
