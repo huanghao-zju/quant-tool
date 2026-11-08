@@ -1,0 +1,4 @@
+# VPS 上只需要跑新闻简报，不装 A 股筛选那套（akshare / pandas / streamlit）。
+# curl_cffi 用来模拟 Chrome 的 TLS 指纹绕过彭博 WAF，PyYAML 读 config.yaml。
+curl_cffi>=0.7
+PyYAML>=6.0

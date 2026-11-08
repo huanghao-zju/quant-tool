@@ -5,7 +5,13 @@ import pytest
 
 from screener.cache import Cache
 from screener.fetch import latest_annual_year, report_dates
-from screener.screen import add_derived, apply_filters, screen_frames
+from screener.screen import (
+    add_derived,
+    add_stability,
+    apply_filters,
+    cap_by_industry,
+    screen_frames,
+)
 
 
 @pytest.fixture
@@ -98,6 +104,265 @@ def test_add_derived_pegy_uses_cagr_and_dividend():
     assert out.loc[0, "peg"] == 10.0 / 100.0
     assert out.loc[0, "pegy"] == 10.0 / (20.0 + 5.0)   # 用 cagr + 股息
     assert out.loc[1, "pegy"] == 10.0 / (100.0 + 0.0)  # 回退单期，股息 0
+
+
+def test_add_derived_pegy_rejects_loss_making():
+    """亏损股（PE<0）且增速为负时，pegy 必须是 NaN 而不是漂亮的小正数。
+
+    反例（真实数据）：万科A PE=-1.62、增速-25%，旧公式算出 pegy=0.064，
+    会被 "pegy<0.5" 判成极低估好标的。全市场有 441 只这样蒙混过关。
+    """
+    df = pd.DataFrame(
+        {
+            "pe_ttm": [-1.62, 10.0, 10.0, -5.0],
+            "net_profit_yoy": [-25.15, 40.0, -3.0, 30.0],
+        }
+    )
+    out = add_derived(df)
+    assert pd.isna(out.loc[0, "pegy"])   # 亏损 + 负增速
+    assert out.loc[1, "pegy"] == pytest.approx(10.0 / 40.0)  # 正常盈利
+    assert pd.isna(out.loc[2, "pegy"])   # 增速为负 -> 分母 <=0
+    assert pd.isna(out.loc[3, "pegy"])   # PE<0 -> 亏损
+
+    # 4 只里只有第 2 只（pegy=0.25）该通过 <0.5 和 >0
+    assert len(apply_filters(out, [{"field": "pegy", "op": "<", "value": 0.5}])) == 1
+    assert len(apply_filters(out, [{"field": "pegy", "op": ">", "value": 0}])) == 1
+
+
+def test_screen_frames_excludes_loss_making_from_pegy_screen():
+    """端到端：亏损且利润下滑的公司不能出现在 PEGY 选股结果里。"""
+    spot = pd.DataFrame(
+        {
+            "code": ["000001", "000002"],
+            "name": ["正常公司", "亏损公司"],
+            "pe_ttm": [10.0, -1.62],
+            "total_mcap": [1e10, 1e10],
+        }
+    )
+    fin = pd.DataFrame(
+        {
+            "code": ["000001", "000002"],
+            "name": ["正常公司", "亏损公司"],
+            "net_profit_yoy": [20.0, -25.15],
+            "cagr_3y": [30.0, -40.0],
+            "div_yield": [2.0, None],
+            "report_date": ["20260630"] * 2,
+        }
+    )
+    # 正常公司 pegy = 10/(30+2) = 0.31 < 0.5；亏损公司双负 -> NaN
+    out = screen_frames(
+        spot, fin, {"exclude_st": False, "filters": [{"field": "pegy", "op": "<", "value": 0.5}]}
+    )
+    assert out["code"].tolist() == ["000001"]
+
+
+def test_cap_by_industry_keeps_best_per_industry():
+    """限流保留每个行业里排序最靠前的 cap 只。"""
+    df = pd.DataFrame(
+        {
+            "code": ["a1", "a2", "a3", "b1", "b2", "c1"],
+            "industry": ["有色", "有色", "有色", "银行", "银行", "白酒"],
+        }
+    )
+    out = cap_by_industry(df, 2)
+    assert out["code"].tolist() == ["a1", "a2", "b1", "b2", "c1"]
+
+
+def test_cap_by_industry_disabled():
+    df = pd.DataFrame({"code": ["a1", "a2"], "industry": ["有色", "有色"]})
+    # 未配置 / 0 / None 都应原样返回
+    for cap in (None, 0, -1):
+        assert cap_by_industry(df, cap)["code"].tolist() == ["a1", "a2"]
+
+
+def test_cap_by_industry_handles_missing_industry():
+    """行业缺失归入「未知」一档，不影响其他行业取满。"""
+    df = pd.DataFrame(
+        {
+            "code": ["a1", "a2", "x1", "x2", "x3"],
+            "industry": ["有色", "有色", None, None, None],
+        }
+    )
+    out = cap_by_industry(df, 2)
+    assert out["code"].tolist() == ["a1", "a2", "x1", "x2"]
+
+
+def test_screen_frames_caps_industry_after_sorting():
+    """限流必须发生在排序之后，留下每行业最优的；且在 top 截断之前生效。"""
+    spot = pd.DataFrame(
+        {
+            "code": [f"00000{i}" for i in range(6)],
+            "name": [f"股{i}" for i in range(6)],
+            # 三只有色、两只银行、一只白酒；pe 越小越好
+            "pe_ttm": [1.0, 2.0, 3.0, 1.5, 2.5, 9.0],
+        }
+    )
+    fin = pd.DataFrame(
+        {
+            "code": [f"00000{i}" for i in range(6)],
+            "name": [f"股{i}" for i in range(6)],
+            "industry": ["有色", "有色", "有色", "银行", "银行", "白酒"],
+            "report_date": ["20260630"] * 6,
+        }
+    )
+    cfg = {
+        "exclude_st": False,
+        "sort_by": "pe_ttm",
+        "ascending": True,
+        "max_per_industry": 2,
+        "top": 50,
+    }
+    out = screen_frames(spot, fin, cfg)
+    # 有色只留 pe 最低的两只（1.0、2.0），银行留两只
+    assert out["code"].tolist() == ["000000", "000003", "000001", "000004", "000005"]
+    assert out["pe_ttm"].tolist() == [1.0, 1.5, 2.0, 2.5, 9.0]
+
+
+def test_screen_frames_industry_cap_applies_before_top():
+    """限流要早于 top：否则被限流的行业会被 top 之前挤占名额。"""
+    spot = pd.DataFrame(
+        {
+            "code": [f"{i:06d}" for i in range(5)],
+            "name": [f"股{i}" for i in range(5)],
+            "pe_ttm": [1.0, 1.1, 1.2, 1.3, 1.4],
+        }
+    )
+    fin = pd.DataFrame(
+        {
+            "code": [f"{i:06d}" for i in range(5)],
+            "name": [f"股{i}" for i in range(5)],
+            "industry": ["有色"] * 3 + ["银行"] * 2,
+            "report_date": ["20260630"] * 5,
+        }
+    )
+    out = screen_frames(
+        spot,
+        fin,
+        {
+            "exclude_st": False,
+            "sort_by": "pe_ttm",
+            "ascending": True,
+            "max_per_industry": 1,
+            "top": 2,
+        },
+    )
+    # 有色限 1 只、银行限 1 只，正好 2 只；若限流失效，top=2 会全是有色
+    assert out["industry"].tolist() == ["有色", "银行"]
+
+
+def test_add_derived_has_dividend_flag():
+    """has_dividend 区分「不分红」与「股息率低」，供筛选直接用。"""
+    df = pd.DataFrame(
+        {
+            "pe_ttm": [10.0, 10.0, 10.0],
+            "net_profit_yoy": [20.0, 20.0, 20.0],
+            "div_yield": [3.0, 0.5, None],  # 有分红 / 股息低 / 从未分红
+        }
+    )
+    out = add_derived(df)
+    assert out["has_dividend"].tolist() == [1, 1, 0]
+    # 分红股用实际股息率，未分红股按 0
+    assert out.loc[0, "pegy"] == pytest.approx(10.0 / 23.0)
+    assert out.loc[1, "pegy"] == pytest.approx(10.0 / 20.5)
+    assert out.loc[2, "pegy"] == pytest.approx(10.0 / 20.0)
+    # 只有未分红的会被筛掉
+    keep = apply_filters(out, [{"field": "has_dividend", "op": "==", "value": 1}])
+    assert len(keep) == 2
+
+
+def test_add_stability_requires_all_periods_positive():
+    """连续正增长：所有对比期 yoy 都 > 0 才算 1，任一期为负或缺失都算 0。"""
+    hist = pd.DataFrame(
+        {
+            "code": ["a", "b", "c", "d"],
+            "revenue_yoy@20260630": [10.0, -5.0, 10.0, None],
+            "revenue_yoy@20260331": [8.0, 20.0, None, 5.0],
+            "net_profit_yoy@20260630": [3.0, 3.0, 3.0, 3.0],
+            "net_profit_yoy@20260331": [2.0, 2.0, 2.0, 2.0],
+        }
+    )
+    out = add_stability(hist)
+    # a 两期都正 -> 1
+    assert out.loc[out.code == "a", "revenue_stable"].iloc[0] == 1
+    # b 有一期为负 -> 0；c 缺一期 -> 0；d 缺一期 -> 0
+    assert out.loc[out.code == "b", "revenue_stable"].iloc[0] == 0
+    assert out.loc[out.code == "c", "revenue_stable"].iloc[0] == 0
+    assert out.loc[out.code == "d", "revenue_stable"].iloc[0] == 0
+    assert out["profit_stable"].tolist() == [1, 1, 1, 1]
+
+
+def test_add_stability_single_period_is_permissive():
+    """只有一期可比时，等价于单期 yoy > 0，门槛不应过严。"""
+    hist = pd.DataFrame(
+        {
+            "code": ["a", "b"],
+            "revenue_yoy@20260630": [10.0, -5.0],
+        }
+    )
+    out = add_stability(hist)
+    assert out["revenue_stable"].tolist() == [1, 0]
+
+
+def test_add_stability_empty_history():
+    assert add_stability(pd.DataFrame()).empty
+
+
+def test_cache_load_financials_history_pivots_periods(tmp_path):
+    """多期宽表：列名带报告期后缀，且只保留各期都有的股票。"""
+    cache = Cache(tmp_path / "h.db")
+    for rd, vals in (
+        ("20260331", {"code": ["000001", "000002"], "revenue_yoy": [10.0, 20.0]}),
+        ("20260630", {"code": ["000001", "000002"], "revenue_yoy": [15.0, 25.0]}),
+    ):
+        cache.save_financials(pd.DataFrame({**vals, "report_date": [rd] * 2}))
+    hist = cache.load_financials_history(["revenue_yoy"], periods=2)
+    assert set(hist["revenue_yoy@20260331"]) == {10.0, 20.0}
+    assert set(hist["revenue_yoy@20260630"]) == {15.0, 25.0}
+    assert cache.available_report_dates() == ["20260630", "20260331"]
+
+
+def test_cache_screen_history_roundtrip(tmp_path):
+    """留痕写入后能读回，含入选时的价格与名次。"""
+    cache = Cache(tmp_path / "h.db")
+    result = pd.DataFrame(
+        {
+            "code": ["000001", "000002"],
+            "name": ["甲", "乙"],
+            "industry": ["有色", "银行"],
+            "price": [10.0, 20.0],
+            "total_mcap": [1e10, 2e10],
+            "pe_ttm": [5.0, 6.0],
+            "pegy": [0.2, 0.3],
+        }
+    )
+    at = cache.save_screen_history(
+        result, {"sort_by": "pegy"}, "20260630", "hash123", "{}", matched=2
+    )
+    hist = cache.list_history()
+    assert len(hist) == 1 and hist["matched"].iloc[0] == 2
+    picks = cache.load_picks(at)
+    assert picks["code"].tolist() == ["000001", "000002"]
+    assert picks["rank"].tolist() == [1, 2]
+    assert picks["price"].tolist() == [10.0, 20.0]
+
+
+def test_cache_screen_history_tolerates_missing_columns(tmp_path):
+    """result 里没有 price/pegy 等列时不应崩，缺失存 NULL。"""
+    cache = Cache(tmp_path / "h.db")
+    result = pd.DataFrame({"code": ["000001"], "name": ["甲"]})
+    at = cache.save_screen_history(result, {}, "20260630", "h", "{}")
+    picks = cache.load_picks(at)
+    assert picks["price"].isna().all()
+
+
+def test_cache_prune_history(tmp_path):
+    cache = Cache(tmp_path / "h.db")
+    cache.save_screen_history(pd.DataFrame({"code": ["000001"]}), {}, None, "h", "{}")
+    assert len(cache.list_history()) == 1
+    cache.prune_history(keep_days=3650)  # 保留 10 年，不该删
+    assert len(cache.list_history()) == 1
+    cache.prune_history(keep_days=0)     # 全部删掉
+    assert len(cache.list_history()) == 0
 
 
 def test_screen_frames_filters_on_pegy():

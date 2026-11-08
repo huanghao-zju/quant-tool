@@ -51,6 +51,8 @@ FIELD_LABELS: dict[str, str] = {
     "eps": "每股收益",
     "revenue": "营业总收入",
     "revenue_yoy": "营收同比%",
+    "revenue_stable": "营收连续正增长(1/0)",
+    "profit_stable": "净利连续正增长(1/0)",
     "net_profit": "净利润",
     "net_profit_yoy": "净利同比%",
     "bps": "每股净资产",
@@ -59,6 +61,7 @@ FIELD_LABELS: dict[str, str] = {
     "ocf_per_share": "每股经营现金流",
     "gross_margin": "毛利率%",
     "div_yield": "股息率%",
+    "has_dividend": "有分红(1/0)",
     "cagr_3y": "3年净利CAGR%",
     "peg": "PEG",
     "pegy": "PEGY",
@@ -100,16 +103,26 @@ def cache_status(db_path: str) -> dict:
 
 
 @st.cache_data(show_spinner="读取缓存…")
-def load_frames(db_path: str, fetched_at: str | None, report_date: str | None):
+def load_frames(
+    db_path: str,
+    fetched_at: str | None,
+    report_date: str | None,
+    stability_periods: int = 2,
+):
     """参数带上时间戳，只是为了让 update 之后缓存自动失效。"""
     cache = Cache(db_path)
     try:
         spot, _ = cache.load_spot()
         fin = cache.load_financials(report_date)
         metrics = cache.load_metrics()
+        history = None
+        if stability_periods > 1:
+            history = cache.load_financials_history(
+                ["revenue_yoy", "net_profit_yoy"], periods=stability_periods
+            )
     finally:
         cache.close()
-    return spot, fin, metrics
+    return spot, fin, metrics, history
 
 
 def _fetch_spot_with_notices() -> tuple[pd.DataFrame, str]:
@@ -318,8 +331,11 @@ def main() -> None:
             if run_update(db_path, spot_only=False):
                 st.rerun()
 
-    spot, fin, metrics = load_frames(
-        db_path, status["spot_fetched_at"], config.get("report_date")
+    spot, fin, metrics, history = load_frames(
+        db_path,
+        status["spot_fetched_at"],
+        config.get("report_date"),
+        int(config.get("stability_periods", 2) or 1),
     )
     if spot is None or fin is None or fin.empty:
         st.warning(
@@ -339,6 +355,12 @@ def main() -> None:
         available += ["peg", "pegy"]
     if "roe" in available and "roe_annual" not in available:
         available.append("roe_annual")
+    if "div_yield" in available and "has_dividend" not in available:
+        available.append("has_dividend")
+    if history is not None and not history.empty:
+        available += [
+            c for c in ("revenue_stable", "profit_stable") if c not in available
+        ]
 
     with st.sidebar:
         st.subheader("筛选条件")
@@ -366,6 +388,12 @@ def main() -> None:
             else None
         )
         ascending = st.toggle("升序", value=config.get("ascending", False), key="ascending")
+        max_per_industry = st.number_input(
+            "每行业最多", min_value=0, max_value=500,
+            value=int(config.get("max_per_industry") or 0), key="max_per_industry",
+            help="每个行业最多保留几只（按排序先后取）。0 = 不限流。"
+                 "周期性行业容易扎堆导致分散失效，可设 3~5。",
+        )
         top = st.number_input(
             "最多显示", min_value=1, max_value=5000,
             value=int(config.get("top") or 50), key="top",
@@ -387,25 +415,46 @@ def main() -> None:
         "filters": st.session_state.filters,
         "sort_by": sort_by,
         "ascending": ascending,
+        "max_per_industry": int(max_per_industry) or None,
         "top": None,  # 先取全量以便显示真实命中数，截断在下面做
         "output_fields": output_fields,
     }
 
     try:
-        result = screen_frames(spot, fin, live_config, metrics)
+        result = screen_frames(spot, fin, live_config, metrics, history)
     except (KeyError, TypeError, ValueError) as e:
         st.error(f"筛选条件有误：{e}")
         return
+
+    # 先不限流跑一次拿到「满足条件」的真实总数，再跑限流后的结果。
+    # 否则侧栏的限流值会把命中数悄悄压低，看不出来有多少只被行业上限挡掉了。
+    cap = int(max_per_industry) or None
+    uncapped_n = None
+    if cap:
+        try:
+            uncapped = screen_frames(
+                spot, fin, {**live_config, "max_per_industry": None}, metrics, history
+            )
+            uncapped_n = len(uncapped)
+        except (KeyError, TypeError, ValueError):
+            pass  # 已在上面 catch 过，这里只是拿参考值，失败不影响主结果
 
     matched = len(result)
     result = result.head(int(top))
 
     m1, m2, m3 = st.columns(3)
-    m1.metric(
-        "命中", f"{matched} 只",
-        delta=f"显示前 {len(result)} 只" if matched > len(result) else None,
-        delta_color="off",
-    )
+    if uncapped_n is not None and uncapped_n > matched:
+        m1.metric(
+            "命中", f"{matched} 只",
+            delta=f"条件命中 {uncapped_n} 只，行业限流后剩 {matched} 只",
+            delta_color="off",
+        )
+    else:
+        m1.metric(
+            "命中", f"{matched} 只",
+            delta=f"显示前 {len(result)} 只" if matched > len(result) else None,
+            delta_color="off",
+        )
     m2.metric("行情快照", (status["spot_fetched_at"] or "")[:16].replace("T", " "))
     m3.metric("财务报告期", str(fin["report_date"].iloc[0]))
 

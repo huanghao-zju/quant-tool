@@ -27,12 +27,45 @@ def merge_frames(
     spot: pd.DataFrame,
     financials: pd.DataFrame,
     metrics: pd.DataFrame | None = None,
+    history: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     fin = financials.drop(columns=["name"], errors="ignore")
     df = spot.merge(fin, on="code", how="inner")
     if metrics is not None and not metrics.empty:
         df = df.merge(metrics, on="code", how="left")
+    if history is not None and not history.empty:
+        df = df.merge(add_stability(history), on="code", how="left")
     return df
+
+
+def add_stability(history: pd.DataFrame) -> pd.DataFrame:
+    """从多期财报拼出的宽表算出「连续正增长」标记。
+
+    ⚠ 只用同比增速（`revenue_yoy` / `net_profit_yoy`）判断，不碰累计绝对值：
+    一季报营收只累计 3 个月、半年报累计 6 个月，跨期直接比大小毫无意义
+    （实测 96.6% 的公司半年报营收都大于一季报，那是口径不是增长）。
+    增速本身已是同比，与报告期长度无关，可以横向比较。
+
+    产出两个 0/1 字段，两期都为正才算 1：
+    - revenue_stable  营收连续正增长
+    - profit_stable   净利连续正增长
+
+    用于挡掉"单期暴增"的周期股：它们的 yoy 常是一期高得离谱、下一期转负。
+    """
+    if history.empty or "code" not in history.columns:
+        return pd.DataFrame()
+    out = history[["code"]].copy()
+    for src, dst in (
+        ("revenue_yoy", "revenue_stable"),
+        ("net_profit_yoy", "profit_stable"),
+    ):
+        cols = [c for c in history.columns if c.startswith(f"{src}@")]
+        if not cols:
+            continue
+        block = history[cols].apply(pd.to_numeric, errors="coerce")
+        # 每期都必须 > 0（缺失或为负都算不通过），期数越多门槛越严
+        out[dst] = ((block > 0).all(axis=1) & block.notna().all(axis=1)).astype(int)
+    return out
 
 
 def annualize_factor(report_date: str | None) -> float:
@@ -53,10 +86,19 @@ def add_derived(df: pd.DataFrame) -> pd.DataFrame:
     pegy = pe_ttm / (增速 + 股息率)  —— 彼得林奇改进式
            增速优先用多年净利 CAGR（cagr_3y），缺失则回退单期同比；
            股息率（div_yield）缺失按 0 计。
+           ⚠ 分母 ≤0（增速为负）或 pe_ttm ≤0（公司亏损）时置 NaN，
+             否则「负 PE ÷ 负增速」会得到一个漂亮的小正数，把亏损股
+             误判成低估值好标的。
+    has_dividend = 1 当该股有分红记录，否则 0
+           div_yield 缺失实际是「查不到分红方案」，多数是公司从未分红。
+           这个字段把「不分红」和「股息率低」区分开，可直接筛选。
     """
     if "roe" in df.columns and "report_date" in df.columns:
         rd = df["report_date"].iloc[0] if len(df) else None
         df["roe_annual"] = pd.to_numeric(df["roe"], errors="coerce") * annualize_factor(rd)
+    if "div_yield" in df.columns:
+        dy = pd.to_numeric(df["div_yield"], errors="coerce")
+        df["has_dividend"] = dy.notna().astype(int)
     if "pe_ttm" not in df.columns or "net_profit_yoy" not in df.columns:
         return df
     pe = pd.to_numeric(df["pe_ttm"], errors="coerce")
@@ -71,7 +113,13 @@ def add_derived(df: pd.DataFrame) -> pd.DataFrame:
         if "div_yield" in df.columns
         else 0
     )
-    df["pegy"] = pe / (growth + dy)
+    denom = growth + dy
+
+    # 亏损股陷阱：PE 为负（公司亏损）且增速也为负时，pe/denom 仍是正数，
+    # 且往往很小 —— 例如 PE=-1.6、增速=-25% 算出 pegy=0.06，会被「pegy<0.5」
+    # 判成"极低估"，实测有 441 只亏损股这样蒙混进来。所以分母为负、或 PE 为负
+    # （增速口径下 PE<0 即亏损）一律置 NaN，让含 NaN 的筛选条件直接淘汰它们。
+    df["pegy"] = pe.where((denom > 0) & (pe > 0)) / denom.where(denom > 0)
     return df
 
 
@@ -89,14 +137,35 @@ def apply_filters(df: pd.DataFrame, filters: list[dict]) -> pd.DataFrame:
     return df[mask]
 
 
+def cap_by_industry(df: pd.DataFrame, cap: int | None) -> pd.DataFrame:
+    """按行业限流：每个行业最多保留 `cap` 只，超出的丢弃。
+
+    必须在排序之后调用 —— 限流的意图是「每个行业只留最好的 N 只」，
+    所以要先有优劣顺序。行业名缺失的归入「未知」一档，不占其他行业名额。
+
+    不设 cap（或 cap <= 0）时原样返回，config 里不写这项即可保持旧行为。
+    """
+    if not cap or cap <= 0 or "industry" not in df.columns:
+        return df
+    industry = df["industry"].fillna("未知")
+    # 按当前行序（即排序后的优劣顺序）逐行取，每行业取满 cap 就跳过后续同行业
+    rank = industry.groupby(industry).cumcount()
+    return df[rank < cap]
+
+
 def screen_frames(
     spot: pd.DataFrame,
     financials: pd.DataFrame,
     config: dict,
     metrics: pd.DataFrame | None = None,
+    history: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """纯函数版筛选入口，便于单测；CLI 从缓存读出各表后调它。"""
-    df = merge_frames(spot, financials, metrics)
+    """纯函数版筛选入口，便于单测；CLI 从缓存读出各表后调它。
+
+    `history` 是多期财报宽表（见 Cache.load_financials_history），传入后会
+    多出 revenue_stable / profit_stable 两个连续正增长标记。
+    """
+    df = merge_frames(spot, financials, metrics, history)
     df = add_derived(df)
 
     if config.get("exclude_st", True):
@@ -110,6 +179,10 @@ def screen_frames(
     sort_by = config.get("sort_by")
     if sort_by:
         df = df.sort_values(sort_by, ascending=config.get("ascending", False))
+
+    # 限流在排序之后：留下的是每个行业里按 sort_by 排最好的 cap 只。
+    # 放在 top 之前，被限流掉的行业不会因为 top 截断而"挤"进来。
+    df = cap_by_industry(df, config.get("max_per_industry"))
 
     top = config.get("top")
     if top:
