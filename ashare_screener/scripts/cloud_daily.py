@@ -20,11 +20,20 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
-from screener.cache import Cache, DEFAULT_DB
-from screener.cli import screen_frames
-from screener.fetch import fetch_financials, fetch_metrics, fetch_spot, report_dates
-
 ROOT = Path(__file__).resolve().parent.parent
+# 直接以脚本方式运行时（CI 里就是 `python3 scripts/cloud_daily.py`），
+# 项目根不在 sys.path 上，import screener 会失败。这里显式补上。
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from screener.cache import Cache, DEFAULT_DB  # noqa: E402
+from screener.cli import screen_frames  # noqa: E402
+from screener.fetch import (  # noqa: E402
+    fetch_financials,
+    fetch_metrics,
+    fetch_spot,
+    report_dates,
+)
 
 
 def load_cfg() -> dict:
