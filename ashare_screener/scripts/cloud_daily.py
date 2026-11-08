@@ -91,6 +91,85 @@ def build_db(db_path: str, cfg: dict, history_periods: int) -> None:
         print("      ⚠ 只有 1 期财报，revenue_stable/profit_stable 将为空", flush=True)
 
 
+def restore_history(db_path: str, history_csv: str) -> None:
+    """把上一轮 CI 留下的选股留痕恢复到新库。
+
+    CI 每次都是全新环境，SQLite 库从零开始。留痕表（screen_history /
+    screen_history_items）是回测的「当时选了什么」凭据，跨轮次必须延续，
+    否则每天的留痕只剩当天的，回测无从谈起。
+
+    留痕以 CSV 形式随结果一起提交回仓库，下一轮 checkout 时读回来。
+    """
+    p = Path(history_csv)
+    if not p.exists():
+        print("无历史留痕文件，从零开始", flush=True)
+        return
+    try:
+        hist = pd.read_csv(p, encoding="utf-8-sig")
+        items = pd.read_csv(p.with_suffix(".items.csv"), encoding="utf-8-sig")
+    except Exception as e:
+        print(f"历史留痕读取失败（忽略）：{e}", flush=True)
+        return
+
+    cache = Cache(db_path)
+    try:
+        cache.init_history()  # 建表，否则空库里恢复会报 no such table
+        with cache.conn:
+            for df, table in ((hist, "screen_history"), (items, "screen_history_items")):
+                cols = {r[1] for r in cache.conn.execute(f"PRAGMA table_info({table})")}
+                if not cols:
+                    continue
+                use = [c for c in df.columns if c in cols]
+                if not use:
+                    continue
+                df[use].to_sql(table, cache.conn, if_exists="append", index=False)
+        print(f"已恢复历史留痕：{len(hist)} 次筛选 / {len(items)} 条明细", flush=True)
+    except Exception as e:
+        print(f"历史留痕恢复失败（忽略）：{e}", flush=True)
+
+
+def record_screen_history(db_path: str, cfg: dict, stats: dict) -> None:
+    """把本次筛选结果写进留痕表，格式与本地 `screener screen` 一致。"""
+    import json as _json
+    import hashlib
+
+    payload = {
+        k: cfg.get(k)
+        for k in ("filters", "exclude_st", "exclude_bse", "sort_by",
+                  "max_per_industry", "top")
+    }
+    config_hash = hashlib.sha256(
+        _json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
+    ).hexdigest()[:12]
+    cache = Cache(db_path)
+    cache.save_screen_history(
+        stats["final_df"],
+        cfg,
+        stats.get("report_date"),
+        config_hash,
+        _json.dumps(payload, sort_keys=True, ensure_ascii=False),
+        matched=stats["post"],
+    )
+    print(f"留痕已记录：config_hash={config_hash} matched={stats['post']}", flush=True)
+
+
+def export_history(db_path: str, history_csv: str) -> None:
+    """把本次的选股留痕导出成 CSV，供下一轮 CI 恢复。"""
+    cache = Cache(db_path)
+    p = Path(history_csv)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        df = pd.read_sql("SELECT * FROM screen_history", cache.conn)
+        df.to_csv(p, index=False, encoding="utf-8-sig")
+    except Exception:
+        return
+    try:
+        items = pd.read_sql("SELECT * FROM screen_history_items", cache.conn)
+        items.to_csv(p.with_suffix(".items.csv"), index=False, encoding="utf-8-sig")
+    except Exception:
+        pass
+
+
 def compute(cfg: dict, db_path: str) -> dict:
     """跑四种口径的筛选，返回报告所需的全部统计量。"""
     cache = Cache(db_path)
@@ -264,13 +343,28 @@ def main() -> int:
     ap.add_argument("--skip-build", action="store_true",
                     help="跳过拉数据，直接用现有库筛选（调试用）")
     ap.add_argument("--no-push", action="store_true")
+    ap.add_argument("--history-csv", default="data/screen_history.csv",
+                    help="选股留痕 CSV（跨 CI 轮次延续用）")
     args = ap.parse_args()
 
     cfg = load_cfg()
     now = dt.datetime.now()
 
+    hist_csv = Path(args.history_csv)
+    if not hist_csv.is_absolute():
+        hist_csv = ROOT / hist_csv
+
+    # 先恢复上一轮的留痕，再建库（建库会新建库，顺序不能反）
+    restore_history(args.db, str(hist_csv))
+
     if not args.skip_build:
         build_db(args.db, cfg, int(cfg.get("stability_periods", 2)))
+
+    # --skip-build 时库里可能什么都没有（CI 全新环境），给个明确提示
+    probe = Cache(args.db)
+    if probe.load_spot()[0] is None or probe.load_financials() is None:
+        print("缓存为空，无法筛选。请去掉 --skip-build 先拉数据。", file=sys.stderr)
+        return 1
 
     stats = compute(cfg, args.db)
 
@@ -293,6 +387,13 @@ def main() -> int:
     if not args.no_push:
         news_cfg = (cfg.get("news") or {}).get("feishu") or {}
         push_feishu(md, news_cfg.get("webhook") or "", news_cfg.get("secret") or "")
+
+    # 记录选股留痕（回测凭据）：与本地 `screener screen` 的留痕格式一致
+    record_screen_history(args.db, cfg, stats)
+
+    # 导出留痕，供下一轮 CI 恢复
+    export_history(args.db, str(hist_csv))
+    print(f"留痕已导出：{hist_csv}", flush=True)
 
     print("\n=== 摘要 ===")
     print(f"命中 {stats['pre']} → 限流后 {stats['post']} → 导出 {stats['final']}")
