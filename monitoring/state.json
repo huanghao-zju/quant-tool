@@ -1,9 +1,9 @@
 {
  "stage": 1,
  "entered": "2026-11-16",
- "quiet_days": 5,
+ "quiet_days": 6,
  "snapshot": [
   "10Y JGB 单周 +20bp（>15bp）"
  ],
- "last_eval_date": "2026-11-24"
+ "last_eval_date": "2026-11-25"
 }
